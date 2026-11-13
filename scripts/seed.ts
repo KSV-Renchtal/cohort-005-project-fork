@@ -74,12 +74,12 @@ async function seed() {
     DROP TABLE IF EXISTS quiz_questions;
     DROP TABLE IF EXISTS quizzes;
     DROP TABLE IF EXISTS lesson_progress;
+    DROP TABLE IF EXISTS enrollments;
     DROP TABLE IF EXISTS coupons;
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
     DROP TABLE IF EXISTS refunds;
     DROP TABLE IF EXISTS purchases;
-    DROP TABLE IF EXISTS enrollments;
     DROP TABLE IF EXISTS lessons;
     DROP TABLE IF EXISTS modules;
     DROP TABLE IF EXISTS courses;
@@ -223,15 +223,40 @@ async function seed() {
   // generated at the bottom of this file. Sign-up dates are spread across the
   // last twelve months, including the last few days.
   const cohortNames = [
-    "Ava Nakamura", "Noah Blackwood", "Isla Fernandes", "Ethan Okafor",
-    "Mia Lindqvist", "Lucas Moreau", "Zara Haddad", "Felix Andersen",
-    "Nina Kowalski", "Omar Rahman", "Chloe Beaumont", "Dmitri Volkov",
-    "Priya Raghavan", "Tomas Silva", "Hana Kim", "Gabriel Rossi",
-    "Amara Diallo", "Jonas Weber", "Lena Petrova", "Kwame Mensah",
-    "Sofia Ricci", "Aarav Shah", "Freya Nilsen", "Diego Castillo",
-    "Yuki Tanaka", "Rosa Delgado", "Idris Bello", "Clara Hoffmann",
-    "Mateo Alvarez", "Elif Demir", "Ruben Ortiz", "Anika Bose",
-    "Caleb Ncube", "Marta Novak",
+    "Ava Nakamura",
+    "Noah Blackwood",
+    "Isla Fernandes",
+    "Ethan Okafor",
+    "Mia Lindqvist",
+    "Lucas Moreau",
+    "Zara Haddad",
+    "Felix Andersen",
+    "Nina Kowalski",
+    "Omar Rahman",
+    "Chloe Beaumont",
+    "Dmitri Volkov",
+    "Priya Raghavan",
+    "Tomas Silva",
+    "Hana Kim",
+    "Gabriel Rossi",
+    "Amara Diallo",
+    "Jonas Weber",
+    "Lena Petrova",
+    "Kwame Mensah",
+    "Sofia Ricci",
+    "Aarav Shah",
+    "Freya Nilsen",
+    "Diego Castillo",
+    "Yuki Tanaka",
+    "Rosa Delgado",
+    "Idris Bello",
+    "Clara Hoffmann",
+    "Mateo Alvarez",
+    "Elif Demir",
+    "Ruben Ortiz",
+    "Anika Bose",
+    "Caleb Ncube",
+    "Marta Novak",
   ];
 
   const cohort = db
@@ -1781,33 +1806,6 @@ This course is still in draft while the cluster examples are rewritten against t
     `Created ${countRows(schema.quizzes)} quizzes with ${countRows(schema.quizQuestions)} questions and ${countRows(schema.quizOptions)} options.`
   );
 
-  // ─── Enrollments ───
-  // Varied enrollment patterns:
-  // - Emma: enrolled in both courses (nearly complete in course 1, mid-way in course 2)
-  // - James: enrolled in course 1 only (completed)
-  // - Olivia: enrolled in both courses (just started course 1, mid-way in course 2)
-  // - Liam: enrolled in course 2 only (just started, abandoned)
-  // - Sophia: enrolled in course 1 only (recently enrolled, barely started)
-
-  db.insert(schema.enrollments)
-    .values([
-      { userId: students[0].id, courseId: course1.id, enrolledAt: daysAgo(50) },
-      { userId: students[0].id, courseId: course2.id, enrolledAt: daysAgo(40) },
-      {
-        userId: students[1].id,
-        courseId: course1.id,
-        enrolledAt: daysAgo(45),
-        completedAt: daysAgo(10),
-      },
-      { userId: students[2].id, courseId: course1.id, enrolledAt: daysAgo(35) },
-      { userId: students[2].id, courseId: course2.id, enrolledAt: daysAgo(30) },
-      { userId: students[3].id, courseId: course2.id, enrolledAt: daysAgo(25) },
-      { userId: students[4].id, courseId: course1.id, enrolledAt: daysAgo(15) },
-    ])
-    .run();
-
-  console.log(`Created ${countRows(schema.enrollments)} enrollments.`);
-
   // ─── Course Ratings ───
   // Star ratings from enrolled students only. Not everyone rates.
   // Course 1 averages 4.3 (4 ratings), course 2 averages 4.5 (2 ratings).
@@ -2059,7 +2057,9 @@ This course is still in draft while the cluster examples are rewritten against t
   markComplete(students[4].id, course1LessonIds[0], 12);
   markInProgress(students[4].id, course1LessonIds[1]);
 
-  console.log(`Created ${countRows(schema.lessonProgress)} lesson progress records.`);
+  console.log(
+    `Created ${countRows(schema.lessonProgress)} lesson progress records.`
+  );
 
   // ─── Quiz Attempts ───
 
@@ -2225,7 +2225,7 @@ This course is still in draft while the cluster examples are rewritten against t
   // ─── Purchases ───
   // Individual purchases for enrolled students
 
-  const [purchase1] = db
+  const [emmaCourse1] = db
     .insert(schema.purchases)
     .values({
       userId: students[0].id, // Emma — bought course 1 individually
@@ -2237,7 +2237,8 @@ This course is still in draft while the cluster examples are rewritten against t
     .returning()
     .all();
 
-  db.insert(schema.purchases)
+  const [emmaCourse2] = db
+    .insert(schema.purchases)
     .values({
       userId: students[0].id, // Emma — bought course 2 individually
       courseId: course2.id,
@@ -2245,9 +2246,11 @@ This course is still in draft while the cluster examples are rewritten against t
       country: "US",
       createdAt: daysAgo(40),
     })
-    .run();
+    .returning()
+    .all();
 
-  db.insert(schema.purchases)
+  const [jamesCourse1] = db
+    .insert(schema.purchases)
     .values({
       userId: students[1].id, // James — bought course 1 with PPP discount (India)
       courseId: course1.id,
@@ -2255,9 +2258,11 @@ This course is still in draft while the cluster examples are rewritten against t
       country: "IN",
       createdAt: daysAgo(45),
     })
-    .run();
+    .returning()
+    .all();
 
-  db.insert(schema.purchases)
+  const [oliviaCourse1] = db
+    .insert(schema.purchases)
     .values({
       userId: students[2].id, // Olivia — bought course 1 individually
       courseId: course1.id,
@@ -2265,9 +2270,11 @@ This course is still in draft while the cluster examples are rewritten against t
       country: "US",
       createdAt: daysAgo(35),
     })
-    .run();
+    .returning()
+    .all();
 
-  db.insert(schema.purchases)
+  const [sophiaCourse1] = db
+    .insert(schema.purchases)
     .values({
       userId: students[4].id, // Sophia — bought course 1 individually
       courseId: course1.id,
@@ -2275,7 +2282,8 @@ This course is still in draft while the cluster examples are rewritten against t
       country: "US",
       createdAt: daysAgo(15),
     })
-    .run();
+    .returning()
+    .all();
 
   console.log(`Created ${countRows(schema.purchases)} individual purchases.`);
 
@@ -2356,6 +2364,64 @@ This course is still in draft while the cluster examples are rewritten against t
   console.log(
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed, ${countRows(schema.coupons, isNull(schema.coupons.redeemedByUserId))} available).`
   );
+
+  // ─── Enrollments ───
+  // Every Enrollment records its source: an own purchase or a Claimed Seat.
+  // - Emma: enrolled in both courses (nearly complete in course 1, mid-way in course 2)
+  // - James: enrolled in course 1 only (completed)
+  // - Olivia: enrolled in both courses (just started course 1, mid-way in course 2 via a seat)
+  // - Liam: enrolled in course 2 only via a seat (just started, abandoned)
+  // - Sophia: enrolled in course 1 only (recently enrolled, barely started)
+
+  db.insert(schema.enrollments)
+    .values([
+      {
+        userId: students[0].id,
+        courseId: course1.id,
+        enrolledAt: daysAgo(50),
+        purchaseId: emmaCourse1.id,
+      },
+      {
+        userId: students[0].id,
+        courseId: course2.id,
+        enrolledAt: daysAgo(40),
+        purchaseId: emmaCourse2.id,
+      },
+      {
+        userId: students[1].id,
+        courseId: course1.id,
+        enrolledAt: daysAgo(45),
+        completedAt: daysAgo(10),
+        purchaseId: jamesCourse1.id,
+      },
+      {
+        userId: students[2].id,
+        courseId: course1.id,
+        enrolledAt: daysAgo(35),
+        purchaseId: oliviaCourse1.id,
+      },
+      {
+        userId: studentByEmail("olivia.martinez@student.dev").id,
+        courseId: course2.id,
+        enrolledAt: daysAgo(30),
+        couponId: seededCoupons[0].id,
+      },
+      {
+        userId: studentByEmail("liam@example.com").id,
+        courseId: course2.id,
+        enrolledAt: daysAgo(25),
+        couponId: seededCoupons[1].id,
+      },
+      {
+        userId: students[4].id,
+        courseId: course1.id,
+        enrolledAt: daysAgo(15),
+        purchaseId: sophiaCourse1.id,
+      },
+    ])
+    .run();
+
+  console.log(`Created ${countRows(schema.enrollments)} enrollments.`);
 
   // ─── Generated history ───
   //
@@ -2460,7 +2526,8 @@ This course is still in draft while the cluster examples are rewritten against t
       ? Math.round((target.course.price * 0.5) / 100) * 100
       : target.course.price;
 
-    db.insert(schema.purchases)
+    const purchase = db
+      .insert(schema.purchases)
       .values({
         userId: buyer.id,
         courseId: target.course.id,
@@ -2468,7 +2535,8 @@ This course is still in draft while the cluster examples are rewritten against t
         country,
         createdAt: daysAgo(purchasedDaysAgo),
       })
-      .run();
+      .returning()
+      .get();
     generatedPurchases++;
 
     db.insert(schema.enrollments)
@@ -2476,6 +2544,7 @@ This course is still in draft while the cluster examples are rewritten against t
         userId: buyer.id,
         courseId: target.course.id,
         enrolledAt: daysAgo(purchasedDaysAgo),
+        purchaseId: purchase.id,
       })
       .run();
     generatedEnrollments++;
@@ -2690,6 +2759,7 @@ This course is still in draft while the cluster examples are rewritten against t
           userId: redeemer.id,
           courseId: course.id,
           enrolledAt: daysAgo(redeemedDaysAgo),
+          couponId: teamCoupons[i].id,
         })
         .run();
     });
@@ -2697,7 +2767,9 @@ This course is still in draft while the cluster examples are rewritten against t
     return { team, purchase, coupons: teamCoupons };
   }
 
-  // Eight seats on TypeScript, six redeemed.
+  // Eight seats on TypeScript, six redeemed. Every redeemer is someone who
+  // never bought TypeScript themselves: a learner has at most one Enrollment
+  // per course, and the unique index on enrollments rejects a second one.
   createTeamPurchase(
     "ava.nakamura@student.dev",
     course1,
@@ -2705,10 +2777,10 @@ This course is still in draft while the cluster examples are rewritten against t
     "TEAM-TS-NAKAMURA",
     120,
     [
-      "noah.blackwood@student.dev",
-      "isla.fernandes@student.dev",
-      "ethan.okafor@student.dev",
-      "mia.lindqvist@student.dev",
+      "felix.andersen@student.dev",
+      "omar.rahman@student.dev",
+      "chloe.beaumont@student.dev",
+      "priya.raghavan@student.dev",
       "lucas.moreau@student.dev",
       "zara.haddad@student.dev",
     ]
@@ -2745,6 +2817,7 @@ This course is still in draft while the cluster examples are rewritten against t
       userId: liam.id,
       courseId: course1.id,
       enrolledAt: daysAgo(9),
+      purchaseId: liamPurchase.id,
     })
     .run();
   db.insert(schema.lessonProgress)

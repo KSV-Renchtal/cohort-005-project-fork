@@ -5,8 +5,10 @@ import {
   real,
   index,
   uniqueIndex,
+  check,
   type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 
 export enum UserRole {
   Student = "student",
@@ -132,8 +134,21 @@ export const enrollments = sqliteTable(
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
     completedAt: text("completed_at"),
+    // The source: exactly one of these is set. An own purchase sets
+    // purchaseId; a Claimed Seat sets couponId.
+    purchaseId: integer("purchase_id").references(() => purchases.id),
+    couponId: integer("coupon_id").references(() => coupons.id),
   },
-  (table) => [index("enrollments_course_idx").on(table.courseId)]
+  (table) => [
+    index("enrollments_course_idx").on(table.courseId),
+    uniqueIndex("enrollments_user_course_idx").on(table.userId, table.courseId),
+    check(
+      "enrollments_one_source",
+      // Unqualified column names: a table-qualified CHECK breaks when a
+      // migration rebuilds the table under a temporary name.
+      sql`("purchase_id" IS NULL) <> ("coupon_id" IS NULL)`
+    ),
+  ]
 );
 
 export const lessonProgress = sqliteTable(
