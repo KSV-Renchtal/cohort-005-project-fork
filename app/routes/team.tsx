@@ -7,25 +7,18 @@ import { getCurrentUserId } from "~/lib/session";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
-import { Users, BookOpen, Copy, Check, AlertTriangle } from "lucide-react";
+import { BookOpen, Copy, Check, AlertTriangle, Lock } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { db } from "~/db";
-import {
-  teams,
-  teamMembers,
-  coupons,
-  courses,
-  users,
-  TeamMemberRole,
-} from "~/db/schema";
+import { teams, teamMembers, TeamMemberRole } from "~/db/schema";
 import { eq, and } from "drizzle-orm";
 import {
   listTeamLicences,
   refundReasonSchema,
   requestTeamLicenceRefund,
 } from "~/lib/refunds.server";
-import { parseFormData } from "~/lib/validation";
-import { isClaimedSeat } from "~/lib/seats.server";
+import { parseFormData, refusalAsFormError } from "~/lib/validation";
+import { listTeamSeats, type SeatStatus } from "~/lib/seats.server";
 import { formatPrice } from "~/lib/utils";
 
 function getTeamForAdmin(userId: number) {
@@ -43,36 +36,6 @@ function getTeamForAdmin(userId: number) {
   if (!membership) return undefined;
 
   return db.select().from(teams).where(eq(teams.id, membership.teamId)).get();
-}
-
-function getCouponsForTeam(teamId: number) {
-  return db.select().from(coupons).where(eq(coupons.teamId, teamId)).all();
-}
-
-function getCourseById(id: number) {
-  return db.select().from(courses).where(eq(courses.id, id)).get();
-}
-
-function getUserById(id: number) {
-  return db.select().from(users).where(eq(users.id, id)).get();
-}
-
-interface CourseStats {
-  courseId: number;
-  courseTitle: string;
-  courseSlug: string;
-  totalSeats: number;
-  claimedSeats: number;
-}
-
-interface CouponRow {
-  id: number;
-  code: string;
-  courseId: number;
-  courseTitle: string;
-  redeemedByEmail: string | null;
-  voided: boolean;
-  createdAt: string;
 }
 
 export function meta() {
@@ -93,74 +56,14 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   if (!team) {
     throw data("You don't have a team. Purchase team seats to create one.", {
-      status: 403,
+      status: 404,
     });
   }
 
-  const allCoupons = getCouponsForTeam(team.id);
-
-  // Build per-course stats
-  const courseMap = new Map<
-    number,
-    {
-      courseId: number;
-      courseTitle: string;
-      courseSlug: string;
-      total: number;
-      claimed: number;
-    }
-  >();
-
-  for (const coupon of allCoupons) {
-    if (!courseMap.has(coupon.courseId)) {
-      const course = getCourseById(coupon.courseId);
-      courseMap.set(coupon.courseId, {
-        courseId: coupon.courseId,
-        courseTitle: course?.title ?? "Unknown Course",
-        courseSlug: course?.slug ?? "",
-        total: 0,
-        claimed: 0,
-      });
-    }
-    const entry = courseMap.get(coupon.courseId)!;
-    entry.total++;
-    if (isClaimedSeat(coupon)) {
-      entry.claimed++;
-    }
-  }
-
-  const courseStats: CourseStats[] = Array.from(courseMap.values()).map(
-    (e) => ({
-      courseId: e.courseId,
-      courseTitle: e.courseTitle,
-      courseSlug: e.courseSlug,
-      totalSeats: e.total,
-      claimedSeats: e.claimed,
-    })
-  );
-
-  // Build coupon rows with redeemer email
-  const couponRows: CouponRow[] = allCoupons.map((coupon) => {
-    let redeemedByEmail: string | null = null;
-    if (coupon.redeemedByUserId !== null) {
-      const user = getUserById(coupon.redeemedByUserId);
-      redeemedByEmail = user?.email ?? null;
-    }
-    const course = getCourseById(coupon.courseId);
-    return {
-      id: coupon.id,
-      code: coupon.code,
-      courseId: coupon.courseId,
-      courseTitle: course?.title ?? "Unknown Course",
-      redeemedByEmail,
-      voided: coupon.voidedAt !== null,
-      createdAt: coupon.createdAt,
-    };
-  });
-
+  const { courseStats, seats } = listTeamSeats(db, team.id);
   const licences = listTeamLicences(db, team.id);
 
-  return { courseStats, couponRows, licences };
+  return { courseStats, seats, licences };
 }
 
 const teamLicenceRefundSchema = refundReasonSchema.extend({
@@ -183,6 +86,12 @@ export async function action({ request }: Route.ActionArgs) {
   requestTeamLicenceRefund(db, { userId: currentUserId, ...parsed.data });
 
   return { errors: null };
+}
+
+// requestTeamLicenceRefund throws when a refund rule blocks the request; show
+// the rule's message next to the form instead of replacing the team page.
+export async function clientAction({ serverAction }: Route.ClientActionArgs) {
+  return refusalAsFormError(serverAction);
 }
 
 function CopyButton({ code }: { code: string }) {
@@ -217,6 +126,45 @@ function CopyButton({ code }: { code: string }) {
   );
 }
 
+function SeatStatusBadge({
+  status,
+  claimedByEmail,
+}: {
+  status: SeatStatus;
+  claimedByEmail: string | null;
+}) {
+  switch (status) {
+    case "claimed":
+      return (
+        <span className="text-muted-foreground">
+          Claimed by {claimedByEmail ?? "a former learner"}
+        </span>
+      );
+    case "void":
+      return (
+        <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+          Void
+        </span>
+      );
+    case "locked":
+      return (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+          title="Locked while this Team Licence has an Open Refund Request"
+        >
+          <Lock className="size-3" />
+          Locked
+        </span>
+      );
+    case "unclaimed":
+      return (
+        <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
+          Unclaimed
+        </span>
+      );
+  }
+}
+
 function TeamLicenceRefund({
   purchaseId,
   amount,
@@ -226,7 +174,7 @@ function TeamLicenceRefund({
   amount: number;
   lastDayInWindow: string;
 }) {
-  const fetcher = useFetcher<{ errors: Record<string, string> | null }>();
+  const fetcher = useFetcher<typeof clientAction>();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const isSubmitting = fetcher.state !== "idle";
 
@@ -236,7 +184,7 @@ function TeamLicenceRefund({
     if (firstError) {
       toast.error(firstError);
     } else {
-      toast.success("Refund requested. We will email you when it is decided.");
+      toast.success("Refund requested.");
     }
   }, [fetcher.state, fetcher.data]);
 
@@ -274,13 +222,13 @@ function TeamLicenceRefund({
 }
 
 export default function Team({ loaderData }: Route.ComponentProps) {
-  const { courseStats, couponRows, licences } = loaderData;
+  const { courseStats, seats, licences } = loaderData;
   const [courseFilter, setCourseFilter] = useState<number | "all">("all");
 
-  const filteredCoupons =
+  const filteredSeats =
     courseFilter === "all"
-      ? couponRows
-      : couponRows.filter((c) => c.courseId === courseFilter);
+      ? seats
+      : seats.filter((seat) => seat.courseId === courseFilter);
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -401,7 +349,7 @@ export default function Team({ loaderData }: Route.ComponentProps) {
           )}
         </div>
 
-        {filteredCoupons.length === 0 ? (
+        {filteredSeats.length === 0 ? (
           <p className="text-sm text-muted-foreground">No coupons yet.</p>
         ) : (
           <div className="overflow-x-auto rounded-md border">
@@ -415,34 +363,25 @@ export default function Team({ loaderData }: Route.ComponentProps) {
                 </tr>
               </thead>
               <tbody>
-                {filteredCoupons.map((coupon) => (
-                  <tr key={coupon.id} className="border-b last:border-0">
+                {filteredSeats.map((seat) => (
+                  <tr key={seat.id} className="border-b last:border-0">
                     <td className="px-4 py-3">
                       <code className="rounded bg-muted px-2 py-0.5 text-xs">
-                        {coupon.code}
+                        {seat.code}
                       </code>
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">
-                      {coupon.courseTitle}
+                      {seat.courseTitle}
                     </td>
                     <td className="px-4 py-3">
-                      {coupon.redeemedByEmail ? (
-                        <span className="text-muted-foreground">
-                          Claimed by {coupon.redeemedByEmail}
-                        </span>
-                      ) : coupon.voided ? (
-                        <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                          Void
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
-                          Unclaimed
-                        </span>
-                      )}
+                      <SeatStatusBadge
+                        status={seat.status}
+                        claimedByEmail={seat.claimedByEmail}
+                      />
                     </td>
                     <td className="px-4 py-3">
-                      {!coupon.redeemedByEmail && !coupon.voided && (
-                        <CopyButton code={coupon.code} />
+                      {seat.status === "unclaimed" && (
+                        <CopyButton code={seat.code} />
                       )}
                     </td>
                   </tr>
@@ -467,7 +406,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         typeof error.data === "string"
           ? error.data
           : "Please select a user from the DevUI panel.";
-    } else if (error.status === 403) {
+    } else if (error.status === 404) {
       title = "No team found";
       message =
         typeof error.data === "string"
