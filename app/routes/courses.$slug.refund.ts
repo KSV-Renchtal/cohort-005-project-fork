@@ -5,7 +5,6 @@ import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
 import {
   courses,
-  coupons,
   lessons,
   modules,
   purchases,
@@ -14,23 +13,19 @@ import {
   videoWatchEvents,
   RefundStatus,
 } from "~/db/schema";
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { formatPrice } from "~/lib/utils";
+import {
+  hasClaimedSeat,
+  purchaseRefundBlocker,
+  refundReasonSchema,
+} from "~/lib/refunds.server";
 
-const REFUND_WINDOW_DAYS = 14;
 const MAX_WATCHED_HOURS = 2;
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
-});
-
-const refundActionSchema = z.object({
-  reason: z
-    .string()
-    .trim()
-    .min(10, "Tell us a little more about why you want a refund.")
-    .max(1000, "Please keep your reason under 1000 characters."),
 });
 
 function getCourseBySlug(slug: string) {
@@ -55,33 +50,6 @@ function getLessonIdsForCourse(courseId: number): number[] {
     .all();
 
   return rows.map((row) => row.id);
-}
-
-function getOpenRefundRequest(purchaseId: number) {
-  return db
-    .select()
-    .from(refunds)
-    .where(
-      and(
-        eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Open)
-      )
-    )
-    .get();
-}
-
-// The fourteen-day window is counted in whole days, not hours — someone who
-// buys at 23:00 should still get the whole of their fourteenth day.
-function calendarDay(when: Date): string {
-  const month = String(when.getMonth() + 1).padStart(2, "0");
-  const day = String(when.getDate()).padStart(2, "0");
-  return `${when.getFullYear()}-${month}-${day}`;
-}
-
-function lastDayOfWindow(purchasedAtIso: string): string {
-  const deadline = new Date(purchasedAtIso);
-  deadline.setDate(deadline.getDate() + REFUND_WINDOW_DAYS);
-  return calendarDay(deadline);
 }
 
 /**
@@ -140,33 +108,15 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("You have not bought this course.", { status: 403 });
   }
 
-  if (getOpenRefundRequest(purchase.id)) {
-    throw data("You already have an open refund request on this purchase.", {
-      status: 409,
-    });
-  }
-
   // A seat that came out of a team licence, and has been claimed, belongs to
   // the team — the learner cannot hand it back on their own.
-  const claimedSeat = db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(
-      and(eq(coupons.purchaseId, purchase.id), isNotNull(coupons.redeemedAt))
-    )
-    .get();
-
-  if (claimedSeat) {
+  if (hasClaimedSeat(db, purchase.id)) {
     throw data("A claimed team seat cannot be refunded.", { status: 403 });
   }
 
-  const today = calendarDay(new Date());
-  const withinRefundWindow = today <= lastDayOfWindow(purchase.createdAt);
-
-  if (!withinRefundWindow) {
-    throw data(`The ${REFUND_WINDOW_DAYS}-day window has closed.`, {
-      status: 403,
-    });
+  const blocker = purchaseRefundBlocker(db, purchase);
+  if (blocker) {
+    throw data(blocker.message, { status: blocker.status });
   }
 
   const courseLessonIds = getLessonIdsForCourse(course.id);
@@ -200,7 +150,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   const formData = await request.formData();
-  const parsed = parseFormData(formData, refundActionSchema);
+  const parsed = parseFormData(formData, refundReasonSchema);
 
   if (!parsed.success) {
     return data({ errors: parsed.errors }, { status: 400 });
