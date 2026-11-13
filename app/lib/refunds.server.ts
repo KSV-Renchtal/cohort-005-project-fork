@@ -2,6 +2,8 @@ import { data } from "react-router";
 import { z } from "zod";
 import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "~/db";
+import { findEnrollment } from "~/lib/enrollments.server";
+import { getCourseProgress, MAX_WATCHED_SECONDS } from "~/lib/admin-refunds.server";
 import {
   coupons,
   courses,
@@ -208,4 +210,85 @@ export function listTeamLicences(db: Db, teamId: number, now: Date = new Date())
       refundBlockedBecause: blocker?.message ?? null,
     };
   });
+}
+
+/**
+ * The learner's own purchase of the course: the one their Enrollment came
+ * from. A Team Licence never gives its buyer an Enrollment, and a Claimed
+ * Seat belongs to the team, so neither is ever found here.
+ */
+function findOwnPurchase(db: Db, userId: number, courseId: number) {
+  const purchaseId = findEnrollment(db, userId, courseId)?.purchaseId;
+  if (purchaseId == null) return undefined;
+  return db.select().from(purchases).where(eq(purchases.id, purchaseId)).get();
+}
+
+/**
+ * Why the learner cannot ask for their own purchase back, or null. Old
+ * learning progress counts: watch time is per learner and lesson, so a
+ * learner who bought again after a refund starts from where they left off.
+ */
+function ownPurchaseRefundBlocker(
+  db: Db,
+  userId: number,
+  purchase: { id: number; courseId: number; createdAt: string },
+  now: Date
+): RefundBlocker | null {
+  const blocker = purchaseRefundBlocker(db, purchase, now);
+  if (blocker) return blocker;
+  const { watchedSeconds } = getCourseProgress(db, userId, purchase.courseId);
+  if (watchedSeconds >= MAX_WATCHED_SECONDS) {
+    return {
+      message: "You have watched too much of this course to request a refund.",
+      status: 403,
+    };
+  }
+  return null;
+}
+
+/**
+ * What the course page offers the learner if they want the money for their
+ * own purchase back, or null if no Refund Request can be raised on it.
+ */
+export function ownPurchaseRefundOffer(
+  db: Db,
+  userId: number,
+  courseId: number,
+  now: Date = new Date()
+) {
+  const purchase = findOwnPurchase(db, userId, courseId);
+  if (!purchase) return null;
+  if (ownPurchaseRefundBlocker(db, userId, purchase, now)) return null;
+  return {
+    amount: purchase.amountPaid,
+    lastDayInWindow: lastDayOfRefundWindow(purchase.createdAt),
+  };
+}
+
+/** A learner asks for the money for their own purchase of a course back. */
+export function requestOwnPurchaseRefund(
+  db: Db,
+  input: { userId: number; courseId: number; reason: string },
+  now: Date = new Date()
+) {
+  const purchase = findOwnPurchase(db, input.userId, input.courseId);
+  if (!purchase) {
+    throw data("You have not bought this course.", { status: 403 });
+  }
+  const blocker = ownPurchaseRefundBlocker(db, input.userId, purchase, now);
+  if (blocker) {
+    throw data(blocker.message, { status: blocker.status });
+  }
+
+  const request = db
+    .insert(refunds)
+    .values({
+      purchaseId: purchase.id,
+      status: RefundStatus.Open,
+      reason: input.reason,
+      requestedAt: now.toISOString(),
+    })
+    .returning()
+    .get();
+  return { request, purchase };
 }

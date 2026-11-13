@@ -3,9 +3,12 @@ import { createTestDb, seedBaseData } from "~/test/setup";
 import type { Db } from "~/db";
 import * as schema from "~/db/schema";
 import { eq } from "drizzle-orm";
-import { claimSeat } from "./enrollments.server";
+import { buyCourse, claimSeat, findEnrollment } from "./enrollments.server";
+import { decideRefundRequest } from "./admin-refunds.server";
 import {
   listTeamLicences,
+  ownPurchaseRefundOffer,
+  requestOwnPurchaseRefund,
   requestTeamLicenceRefund,
 } from "./refunds.server";
 
@@ -52,6 +55,13 @@ function addTeamMember(
   role: schema.TeamMemberRole
 ) {
   db.insert(schema.teamMembers).values({ teamId, userId, role }).run();
+}
+
+function setPurchasedAt(db: Db, purchaseId: number, when: Date) {
+  db.update(schema.purchases)
+    .set({ createdAt: when.toISOString() })
+    .where(eq(schema.purchases.id, purchaseId))
+    .run();
 }
 
 function eqId(id: number) {
@@ -254,5 +264,188 @@ describe("listTeamLicences", () => {
       refundBlockedBecause:
         "A Team Licence with a claimed seat cannot be refunded.",
     });
+  });
+});
+
+describe("requestOwnPurchaseRefund", () => {
+  it("asks for the learner's own purchase back, never a Team Licence they bought", () => {
+    const { db, course, buyer, purchase: teamLicence } = setup();
+    const { purchase: own } = buyCourse(db, {
+      userId: buyer.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: null,
+    });
+    // The Team Licence is the newer of the two purchases.
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    setPurchasedAt(db, own.id, yesterday);
+    setPurchasedAt(db, teamLicence.id, new Date());
+
+    const { request } = requestOwnPurchaseRefund(db, {
+      userId: buyer.id,
+      courseId: course.id,
+      reason: REASON,
+    });
+
+    expect(request.purchaseId).toBe(own.id);
+  });
+
+  it("allows a new request after a decline, but none after an approval", () => {
+    const { db, course, learner, admin } = ownPurchaseSetup();
+    const ask = () =>
+      requestOwnPurchaseRefund(db, {
+        userId: learner.id,
+        courseId: course.id,
+        reason: REASON,
+      }).request;
+    const decide = (refundId: number, decision: "approve" | "decline") =>
+      decideRefundRequest(db, { refundId, decision, adminUserId: admin.id });
+
+    decide(ask().id, "decline");
+    decide(ask().id, "approve");
+
+    expect(rejection(ask)).toMatchObject({ init: { status: 403 } });
+  });
+
+  it("lets a refunded learner buy again and ask again", () => {
+    const { db, course, learner, admin } = ownPurchaseSetup();
+    const { request } = requestOwnPurchaseRefund(db, {
+      userId: learner.id,
+      courseId: course.id,
+      reason: REASON,
+    });
+    decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "approve",
+      adminUserId: admin.id,
+    });
+
+    buyCourse(db, {
+      userId: learner.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: null,
+    });
+    const ask = () =>
+      requestOwnPurchaseRefund(db, {
+        userId: learner.id,
+        courseId: course.id,
+        reason: REASON,
+      });
+
+    expect(ask().request.status).toBe(schema.RefundStatus.Open);
+    expect(findEnrollment(db, learner.id, course.id)).toBeDefined();
+  });
+
+  it("counts watch time from before a refund towards the 2-hour limit", () => {
+    const { db, course, learner, admin, lesson } = ownPurchaseSetup();
+    watch(db, learner.id, lesson.id, 2 * 60 * 60);
+    const purchaseId = findEnrollment(db, learner.id, course.id)?.purchaseId;
+    const refund = db
+      .insert(schema.refunds)
+      .values({ purchaseId: purchaseId ?? 0, reason: REASON })
+      .returning()
+      .get();
+    decideRefundRequest(db, {
+      refundId: refund.id,
+      decision: "approve",
+      adminUserId: admin.id,
+    });
+
+    buyCourse(db, {
+      userId: learner.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: null,
+    });
+
+    expect(
+      rejection(() =>
+        requestOwnPurchaseRefund(db, {
+          userId: learner.id,
+          courseId: course.id,
+          reason: REASON,
+        })
+      )
+    ).toMatchObject({ init: { status: 403 } });
+  });
+
+  it("is not offered to a learner who claimed a seat", () => {
+    const { db, course, learner } = setup();
+    claimSeat(db, { code: "SEAT-1", userId: learner.id, userCountry: "US" });
+
+    const error = rejection(() =>
+      requestOwnPurchaseRefund(db, {
+        userId: learner.id,
+        courseId: course.id,
+        reason: REASON,
+      })
+    );
+
+    expect(error).toMatchObject({ init: { status: 403 } });
+  });
+});
+
+function ownPurchaseSetup() {
+  const db = createTestDb();
+  const { course, user: learner } = seedBaseData(db);
+  const admin = db
+    .insert(schema.users)
+    .values({ name: "Admin", email: "admin@example.com", role: schema.UserRole.Admin })
+    .returning()
+    .get();
+  const module = db
+    .insert(schema.modules)
+    .values({ courseId: course.id, title: "Intro", position: 1 })
+    .returning()
+    .get();
+  const lesson = db
+    .insert(schema.lessons)
+    .values({ moduleId: module.id, title: "Welcome", position: 1 })
+    .returning()
+    .get();
+  buyCourse(db, {
+    userId: learner.id,
+    courseId: course.id,
+    amountPaid: 7900,
+    country: null,
+  });
+  return { db, course, learner, admin, lesson };
+}
+
+function watch(db: Db, userId: number, lessonId: number, positionSeconds: number) {
+  db.insert(schema.videoWatchEvents)
+    .values({ userId, lessonId, eventType: "progress", positionSeconds })
+    .run();
+}
+
+describe("ownPurchaseRefundOffer", () => {
+  it("offers the learner's own purchase back until it is refunded", () => {
+    const { db, course, learner, admin } = ownPurchaseSetup();
+    const offer = () => ownPurchaseRefundOffer(db, learner.id, course.id);
+
+    expect(offer()).toMatchObject({ amount: 7900 });
+
+    const { request } = requestOwnPurchaseRefund(db, {
+      userId: learner.id,
+      courseId: course.id,
+      reason: REASON,
+    });
+    decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "approve",
+      adminUserId: admin.id,
+    });
+
+    expect(offer()).toBeNull();
+  });
+
+  it("offers nothing to the buyer of a Team Licence or a learner with a seat", () => {
+    const { db, course, buyer, learner } = setup();
+    claimSeat(db, { code: "SEAT-1", userId: learner.id, userCountry: "US" });
+
+    expect(ownPurchaseRefundOffer(db, buyer.id, course.id)).toBeNull();
+    expect(ownPurchaseRefundOffer(db, learner.id, course.id)).toBeNull();
   });
 });
