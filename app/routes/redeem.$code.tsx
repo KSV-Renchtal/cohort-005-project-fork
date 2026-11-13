@@ -5,7 +5,11 @@ import { z } from "zod";
 import type { Route } from "./+types/redeem.$code";
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
-import { parseParams, parseFormData } from "~/lib/validation";
+import {
+  parseParams,
+  parseFormData,
+  refusalAsFormError,
+} from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Ticket, AlertCircle, CheckCircle2, Globe, Lock } from "lucide-react";
@@ -13,11 +17,8 @@ import { data } from "react-router";
 import { db } from "~/db";
 import { purchases, coupons, courses } from "~/db/schema";
 import { eq } from "drizzle-orm";
-import {
-  claimSeat,
-  findEnrollment,
-  seatLockMessage,
-} from "~/lib/enrollments.server";
+import { claimSeat, findEnrollment } from "~/lib/enrollments.server";
+import { isClaimedSeat, seatLockMessage } from "~/lib/seats.server";
 
 function getCourseById(id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
@@ -67,7 +68,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  const alreadyRedeemed = coupon.redeemedByUserId !== null;
+  const alreadyRedeemed = isClaimedSeat(coupon);
   const alreadyEnrolled = isUserEnrolled(currentUserId, coupon.courseId);
   const lockMessage = alreadyRedeemed ? null : seatLockMessage(db, coupon);
   const voided = coupon.voidedAt !== null;
@@ -113,17 +114,13 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   const userCountry = await resolveCountry(request);
-  const result = claimSeat(db, {
+  const enrollment = claimSeat(db, {
     code,
     userId: currentUserId,
     userCountry: userCountry ?? "",
   });
 
-  if (!result.ok) {
-    return data({ error: result.error }, { status: 400 });
-  }
-
-  const course = getCourseById(result.enrollment.courseId);
+  const course = getCourseById(enrollment.courseId);
   if (!course) {
     throw redirect("/courses");
   }
@@ -131,10 +128,12 @@ export async function action({ params, request }: Route.ActionArgs) {
   throw redirect(`/courses/${course.slug}/welcome`);
 }
 
-export default function Redeem({
-  loaderData,
-  actionData,
-}: Route.ComponentProps) {
+// claimSeat throws when the seat cannot be claimed; show why as a toast.
+export async function clientAction({ serverAction }: Route.ClientActionArgs) {
+  return refusalAsFormError(serverAction);
+}
+
+export default function Redeem({ loaderData }: Route.ComponentProps) {
   const {
     course,
     code,
@@ -144,16 +143,15 @@ export default function Redeem({
     lockMessage,
     voided,
   } = loaderData;
-  const fetcher = useFetcher();
+  const fetcher = useFetcher<typeof clientAction>();
   const isSubmitting = fetcher.state !== "idle";
 
   useEffect(() => {
-    const error =
-      fetcher.data?.error ?? (actionData as { error?: string })?.error;
-    if (error) {
+    const error = fetcher.data?.errors.form;
+    if (fetcher.state === "idle" && error) {
       toast.error(error);
     }
-  }, [fetcher.data, actionData]);
+  }, [fetcher.state, fetcher.data]);
 
   // Determine which state to show
   return (

@@ -3,11 +3,8 @@ import { createTestDb, seedBaseData } from "~/test/setup";
 import type { Db } from "~/db";
 import * as schema from "~/db/schema";
 import { buyCourse, claimSeat, findEnrollment } from "./enrollments.server";
-import {
-  decideRefundRequest,
-  getCourseProgress,
-  listOpenRefundRequests,
-} from "./admin-refunds.server";
+import { decideRefundRequest, listOpenRefundRequests } from "./admin-refunds.server";
+import { getCourseProgress } from "./course-progress.server";
 
 function setup() {
   const db = createTestDb();
@@ -212,7 +209,7 @@ describe("listOpenRefundRequests", () => {
   });
 });
 
-function addAdmin(db: Db, name = "Pat") {
+function addPlatformAdmin(db: Db, name = "Pat") {
   return db
     .insert(schema.users)
     .values({
@@ -227,7 +224,7 @@ function addAdmin(db: Db, name = "Pat") {
 describe("decideRefundRequest", () => {
   it("declining records who decided and when, refunds nothing and keeps the Enrollment", () => {
     const { db, user, course } = setup();
-    const admin = addAdmin(db);
+    const admin = addPlatformAdmin(db);
     const { purchase } = buyCourse(db, {
       userId: user.id,
       courseId: course.id,
@@ -240,10 +237,9 @@ describe("decideRefundRequest", () => {
 
     const decided = decideRefundRequest(db, {
       refundId: request.id,
-      decision: "decline",
-      adminUserId: admin.id,
-      now: "2026-11-05T09:00:00.000Z",
-    });
+      decision: schema.RefundStatus.Declined,
+      platformAdminUserId: admin.id,
+    }, new Date("2026-11-05T09:00:00.000Z"));
 
     expect(decided).toMatchObject({
       status: schema.RefundStatus.Declined,
@@ -257,7 +253,7 @@ describe("decideRefundRequest", () => {
 
   it("approving refunds the full amount paid and ends the Enrollment from that purchase", () => {
     const { db, user, course } = setup();
-    const admin = addAdmin(db);
+    const admin = addPlatformAdmin(db);
     const { purchase } = buyCourse(db, {
       userId: user.id,
       courseId: course.id,
@@ -270,10 +266,9 @@ describe("decideRefundRequest", () => {
 
     const decided = decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: admin.id,
-      now: "2026-11-05T09:00:00.000Z",
-    });
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
+    }, new Date("2026-11-05T09:00:00.000Z"));
 
     expect(decided).toMatchObject({
       status: schema.RefundStatus.Approved,
@@ -286,7 +281,7 @@ describe("decideRefundRequest", () => {
 
   it("approving keeps learning progress and is not blocked by watch time over the limit", () => {
     const { db, user, course } = setup();
-    const admin = addAdmin(db);
+    const admin = addPlatformAdmin(db);
     const lesson = addLesson(db, course.id, 1);
     const { purchase } = buyCourse(db, {
       userId: user.id,
@@ -308,8 +303,8 @@ describe("decideRefundRequest", () => {
 
     const decided = decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     expect(decided.status).toBe(schema.RefundStatus.Approved);
@@ -322,7 +317,7 @@ describe("decideRefundRequest", () => {
 
   it("approving a Team Licence voids its Unclaimed Seats and keeps the Team Admin's own Enrollment", () => {
     const { db, user: ava, course } = setup();
-    const admin = addAdmin(db);
+    const admin = addPlatformAdmin(db);
     const own = buyCourse(db, {
       userId: ava.id,
       courseId: course.id,
@@ -354,10 +349,9 @@ describe("decideRefundRequest", () => {
 
     const decided = decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: admin.id,
-      now: "2026-11-05T09:00:00.000Z",
-    });
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
+    }, new Date("2026-11-05T09:00:00.000Z"));
 
     expect(decided.amountRefunded).toBe(23700);
     const seats = db.select().from(schema.coupons).all();
@@ -376,8 +370,8 @@ describe("decideRefundRequest", () => {
 
   it("rejects a second decision with \"already decided\" and the first one stands", () => {
     const { db, user, course } = setup();
-    const first = addAdmin(db, "Pat");
-    const second = addAdmin(db, "Sam");
+    const first = addPlatformAdmin(db, "Pat");
+    const second = addPlatformAdmin(db, "Sam");
     const { purchase } = buyCourse(db, {
       userId: user.id,
       courseId: course.id,
@@ -389,16 +383,16 @@ describe("decideRefundRequest", () => {
     });
     decideRefundRequest(db, {
       refundId: request.id,
-      decision: "decline",
-      adminUserId: first.id,
+      decision: schema.RefundStatus.Declined,
+      platformAdminUserId: first.id,
     });
 
     let rejection: unknown;
     try {
       decideRefundRequest(db, {
         refundId: request.id,
-        decision: "approve",
-        adminUserId: second.id,
+        decision: schema.RefundStatus.Approved,
+        platformAdminUserId: second.id,
       });
     } catch (error) {
       rejection = error;

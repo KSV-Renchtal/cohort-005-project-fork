@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { buyCourse, claimSeat, findEnrollment } from "./enrollments.server";
 import { decideRefundRequest } from "./admin-refunds.server";
 import {
+  findRefundableOwnPurchase,
   listTeamLicences,
   ownPurchaseRefundOffer,
   requestOwnPurchaseRefund,
@@ -299,11 +300,14 @@ describe("requestOwnPurchaseRefund", () => {
         courseId: course.id,
         reason: REASON,
       }).request;
-    const decide = (refundId: number, decision: "approve" | "decline") =>
-      decideRefundRequest(db, { refundId, decision, adminUserId: admin.id });
+    const decide = (
+      refundId: number,
+      decision: schema.RefundStatus.Approved | schema.RefundStatus.Declined
+    ) =>
+      decideRefundRequest(db, { refundId, decision, platformAdminUserId: admin.id });
 
-    decide(ask().id, "decline");
-    decide(ask().id, "approve");
+    decide(ask().id, schema.RefundStatus.Declined);
+    decide(ask().id, schema.RefundStatus.Approved);
 
     expect(rejection(ask)).toMatchObject({ init: { status: 403 } });
   });
@@ -317,8 +321,8 @@ describe("requestOwnPurchaseRefund", () => {
     });
     decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     buyCourse(db, {
@@ -349,8 +353,8 @@ describe("requestOwnPurchaseRefund", () => {
       .get();
     decideRefundRequest(db, {
       refundId: refund.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     buyCourse(db, {
@@ -434,8 +438,8 @@ describe("ownPurchaseRefundOffer", () => {
     });
     decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     expect(offer()).toBeNull();
@@ -447,5 +451,40 @@ describe("ownPurchaseRefundOffer", () => {
 
     expect(ownPurchaseRefundOffer(db, buyer.id, course.id)).toBeNull();
     expect(ownPurchaseRefundOffer(db, learner.id, course.id)).toBeNull();
+  });
+});
+
+describe("findRefundableOwnPurchase", () => {
+  it("returns the learner's own purchase when a Refund Request can be raised on it", () => {
+    const { db, course, learner } = ownPurchaseSetup();
+
+    expect(findRefundableOwnPurchase(db, learner.id, course.id)).toMatchObject({
+      userId: learner.id,
+      courseId: course.id,
+      amountPaid: 7900,
+    });
+  });
+
+  it("refuses, before any reason is looked at, when a rule blocks the request", () => {
+    const { db, course, learner, lesson } = ownPurchaseSetup();
+    watch(db, learner.id, lesson.id, 2 * 60 * 60);
+
+    expect(
+      rejection(() => findRefundableOwnPurchase(db, learner.id, course.id))
+    ).toMatchObject({
+      data: "You have watched too much of this course to request a refund.",
+      init: { status: 403 },
+    });
+  });
+
+  it("refuses a learner who did not buy the course", () => {
+    const { db, course, admin } = ownPurchaseSetup();
+
+    expect(
+      rejection(() => findRefundableOwnPurchase(db, admin.id, course.id))
+    ).toMatchObject({
+      data: "You have not bought this course.",
+      init: { status: 403 },
+    });
   });
 });

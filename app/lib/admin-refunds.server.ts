@@ -1,87 +1,22 @@
 import { data } from "react-router";
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, not } from "drizzle-orm";
 import type { Db } from "~/db";
 import {
-  LessonProgressStatus,
   RefundStatus,
   coupons,
   enrollments,
   courses,
-  lessonProgress,
-  lessons,
-  modules,
   purchases,
   refunds,
   users,
-  videoWatchEvents,
 } from "~/db/schema";
-
-export const REFUND_WINDOW_DAYS = 14;
-export const MAX_WATCHED_SECONDS = 2 * 60 * 60;
-
-// Calendar days from the purchase to the request, as the refund window counts
-// them: the purchase day is day 0 and the last day a request is allowed is
-// day 14.
-function calendarDaysBetween(fromIso: string, toIso: string) {
-  const startOfDay = (iso: string) => {
-    const when = new Date(iso);
-    return new Date(when.getFullYear(), when.getMonth(), when.getDate());
-  };
-  const ms = startOfDay(toIso).getTime() - startOfDay(fromIso).getTime();
-  return Math.round(ms / (24 * 60 * 60 * 1000));
-}
-
-/**
- * A learner's progress in one course right now: watch time is the furthest
- * position reached in each lesson, summed (the same measure as the refund
- * eligibility rule), plus how many of the course's lessons they completed.
- */
-export function getCourseProgress(db: Db, userId: number, courseId: number) {
-  const lessonIds = db
-    .select({ id: lessons.id })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .where(eq(modules.courseId, courseId))
-    .all()
-    .map((row) => row.id);
-
-  if (lessonIds.length === 0) {
-    return { watchedSeconds: 0, completedLessons: 0, totalLessons: 0 };
-  }
-
-  const watchedSeconds = db
-    .select({
-      furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
-    })
-    .from(videoWatchEvents)
-    .where(
-      and(
-        eq(videoWatchEvents.userId, userId),
-        inArray(videoWatchEvents.lessonId, lessonIds)
-      )
-    )
-    .groupBy(videoWatchEvents.lessonId)
-    .all()
-    .reduce((total, row) => total + row.furthest, 0);
-
-  const completed = db
-    .select({ count: sql<number>`count(distinct ${lessonProgress.lessonId})` })
-    .from(lessonProgress)
-    .where(
-      and(
-        eq(lessonProgress.userId, userId),
-        eq(lessonProgress.status, LessonProgressStatus.Completed),
-        inArray(lessonProgress.lessonId, lessonIds)
-      )
-    )
-    .get();
-
-  return {
-    watchedSeconds,
-    completedLessons: completed?.count ?? 0,
-    totalLessons: lessonIds.length,
-  };
-}
+import { getCourseProgress } from "~/lib/course-progress.server";
+import { dayOfRefundWindow, watchedPastRefundLimit } from "~/lib/refunds.server";
+import {
+  claimedSeatCondition,
+  countSeats,
+  isTeamLicence,
+} from "~/lib/seats.server";
 
 /** Every Open Refund Request, oldest first, for a Platform Admin to decide. */
 export function listOpenRefundRequests(db: Db) {
@@ -108,20 +43,9 @@ export function listOpenRefundRequests(db: Db) {
 
   return rows.map((row) => ({
     ...row,
-    dayOfWindow: calendarDaysBetween(row.purchasedAt, row.requestedAt),
+    dayOfWindow: dayOfRefundWindow(row.purchasedAt, new Date(row.requestedAt)),
     progress: progressFor(db, row.purchaseId, row.requesterId, row.courseId),
   }));
-}
-
-function countSeats(db: Db, purchaseId: number) {
-  return db
-    .select({
-      totalSeats: sql<number>`count(*)`,
-      claimedSeats: sql<number>`count(${coupons.redeemedByUserId})`,
-    })
-    .from(coupons)
-    .where(eq(coupons.purchaseId, purchaseId))
-    .get();
 }
 
 function progressFor(
@@ -132,8 +56,8 @@ function progressFor(
 ) {
   // A purchase with seats is a Team Licence; the buyer's own watch time says
   // nothing about it.
-  const seats = countSeats(db, purchaseId);
-  if (seats && seats.totalSeats > 0) {
+  if (isTeamLicence(db, purchaseId)) {
+    const seats = countSeats(db, purchaseId);
     return {
       kind: "teamLicence" as const,
       claimedSeats: seats.claimedSeats,
@@ -145,11 +69,9 @@ function progressFor(
   return {
     kind: "own" as const,
     ...progress,
-    overWatchLimit: progress.watchedSeconds >= MAX_WATCHED_SECONDS,
+    overWatchLimit: watchedPastRefundLimit(progress.watchedSeconds),
   };
 }
-
-export type RefundDecision = "approve" | "decline";
 
 /**
  * A Platform Admin approves or declines an Open Refund Request. Decisions are
@@ -159,12 +81,12 @@ export function decideRefundRequest(
   db: Db,
   input: {
     refundId: number;
-    decision: RefundDecision;
-    adminUserId: number;
-    now?: string;
-  }
+    decision: RefundStatus.Approved | RefundStatus.Declined;
+    platformAdminUserId: number;
+  },
+  now: Date = new Date()
 ) {
-  const resolvedAt = input.now ?? new Date().toISOString();
+  const resolvedAt = now.toISOString();
   return db.transaction((tx) => {
     const request = tx
       .select({ purchaseId: refunds.purchaseId, amountPaid: purchases.amountPaid })
@@ -178,14 +100,14 @@ export function decideRefundRequest(
 
     // First decision wins: the update only matches while the request is
     // still Open, so a second Platform Admin's decision changes nothing.
-    const approve = input.decision === "approve";
+    const approve = input.decision === RefundStatus.Approved;
     const decided = tx
       .update(refunds)
       .set({
-        status: approve ? RefundStatus.Approved : RefundStatus.Declined,
+        status: input.decision,
         amountRefunded: approve ? request.amountPaid : null,
         resolvedAt,
-        resolvedByUserId: input.adminUserId,
+        resolvedByUserId: input.platformAdminUserId,
       })
       .where(
         and(eq(refunds.id, input.refundId), eq(refunds.status, RefundStatus.Open))
@@ -208,7 +130,7 @@ export function decideRefundRequest(
         .where(
           and(
             eq(coupons.purchaseId, request.purchaseId),
-            isNull(coupons.redeemedByUserId)
+            not(claimedSeatCondition)
           )
         )
         .run();

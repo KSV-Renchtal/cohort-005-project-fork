@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { ownPurchaseRefundOffer } from "~/lib/refunds.server";
-import { getCourseProgress } from "~/lib/admin-refunds.server";
+import { getCourseProgress } from "~/lib/course-progress.server";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";

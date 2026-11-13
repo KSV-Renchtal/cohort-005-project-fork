@@ -1,13 +1,8 @@
 import { data } from "react-router";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "~/db";
-import {
-  coupons,
-  enrollments,
-  purchases,
-  refunds,
-  RefundStatus,
-} from "~/db/schema";
+import { isClaimedSeat, seatLockMessage } from "~/lib/seats.server";
+import { coupons, enrollments, purchases } from "~/db/schema";
 
 // Every Enrollment records its source: the learner's own purchase or a
 // Claimed Seat. A learner has at most one Enrollment per course.
@@ -52,66 +47,35 @@ export function buyCourse(
   });
 }
 
-export const VOIDED_SEAT_MESSAGE =
-  "This place was refunded and is no longer valid";
-
-export const FROZEN_SEAT_MESSAGE =
-  "This place is currently locked while a refund request is reviewed.";
-
 /**
- * Why nobody can claim this Unclaimed Seat, or null: it was voided when its
- * Team Licence was refunded, or it is frozen while that Team Licence has an
- * Open Refund Request.
+ * The learner claims an Unclaimed Seat and gets an Enrollment from it.
+ * Throws a response with the reason when the seat cannot be claimed.
  */
-export function seatLockMessage(
-  db: Db,
-  seat: { purchaseId: number; voidedAt: string | null }
-): string | null {
-  if (seat.voidedAt !== null) return VOIDED_SEAT_MESSAGE;
-  const openRequest = db
-    .select({ id: refunds.id })
-    .from(refunds)
-    .where(
-      and(
-        eq(refunds.purchaseId, seat.purchaseId),
-        eq(refunds.status, RefundStatus.Open)
-      )
-    )
-    .get();
-  if (openRequest) return FROZEN_SEAT_MESSAGE;
-  return null;
-}
-
-export type ClaimSeatResult =
-  | { ok: true; enrollment: typeof enrollments.$inferSelect }
-  | { ok: false; error: string };
-
-/** The learner claims an Unclaimed Seat and gets an Enrollment from it. */
 export function claimSeat(
   db: Db,
   input: { code: string; userId: number; userCountry: string }
-): ClaimSeatResult {
-  return db.transaction((tx): ClaimSeatResult => {
+) {
+  return db.transaction((tx) => {
     const seat = tx
       .select()
       .from(coupons)
       .where(eq(coupons.code, input.code))
       .get();
     if (!seat) {
-      return { ok: false, error: "Coupon not found" };
+      throw data("No Unclaimed Seat matches this link.", { status: 404 });
     }
 
-    if (seat.redeemedByUserId !== null) {
-      return { ok: false, error: "Coupon has already been redeemed" };
+    if (isClaimedSeat(seat)) {
+      throw data("This place is already a Claimed Seat.", { status: 409 });
     }
 
     const lockMessage = seatLockMessage(tx, seat);
     if (lockMessage) {
-      return { ok: false, error: lockMessage };
+      throw data(lockMessage, { status: seat.voidedAt !== null ? 410 : 409 });
     }
 
     if (findEnrollment(tx, input.userId, seat.courseId)) {
-      return { ok: false, error: "You are already enrolled in this course" };
+      throw data("You are already enrolled in this course", { status: 409 });
     }
 
     const purchase = tx
@@ -121,11 +85,10 @@ export function claimSeat(
       .get();
 
     if (purchase?.country && purchase.country !== input.userCountry) {
-      return {
-        ok: false,
-        error:
-          "This coupon can only be redeemed from the same country as the purchaser",
-      };
+      throw data(
+        "This Unclaimed Seat can only be claimed from the purchaser's country.",
+        { status: 403 }
+      );
     }
 
     tx.update(coupons)
@@ -136,7 +99,7 @@ export function claimSeat(
       .where(eq(coupons.id, seat.id))
       .run();
 
-    const enrollment = tx
+    return tx
       .insert(enrollments)
       .values({
         userId: input.userId,
@@ -145,7 +108,5 @@ export function claimSeat(
       })
       .returning()
       .get();
-
-    return { ok: true, enrollment };
   });
 }

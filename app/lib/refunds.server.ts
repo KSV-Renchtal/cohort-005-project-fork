@@ -1,9 +1,14 @@
 import { data } from "react-router";
 import { z } from "zod";
-import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "~/db";
 import { findEnrollment } from "~/lib/enrollments.server";
-import { getCourseProgress, MAX_WATCHED_SECONDS } from "~/lib/admin-refunds.server";
+import { getCourseProgress } from "~/lib/course-progress.server";
+import {
+  countClaimedSeats,
+  hasClaimedSeat,
+  teamIdOfTeamLicence,
+} from "~/lib/seats.server";
 import {
   coupons,
   courses,
@@ -31,6 +36,14 @@ function isTeamAdmin(db: Db, userId: number, teamId: number) {
 
 export const REFUND_WINDOW_DAYS = 14;
 
+/** A learner who watched this much of a course cannot ask for their own purchase back. */
+export const MAX_WATCHED_SECONDS = 2 * 60 * 60;
+
+/** Whether the learner watched too much of the course to ask for their own purchase back. */
+export function watchedPastRefundLimit(watchedSeconds: number) {
+  return watchedSeconds >= MAX_WATCHED_SECONDS;
+}
+
 /** The reason box on every Refund Request form. */
 export const refundReasonSchema = z.object({
   reason: z
@@ -40,19 +53,36 @@ export const refundReasonSchema = z.object({
     .max(1000, "Please keep your reason under 1000 characters."),
 });
 
-// The fourteen-day window is counted in whole calendar days, not hours: a
-// purchase at 23:00 still gets the whole of its fourteenth day.
-function calendarDay(when: Date): string {
+// The fourteen-day window is counted in whole calendar days, not hours: the
+// purchase day is day 0 and a purchase at 23:00 still gets the whole of day 14.
+function startOfCalendarDay(when: Date) {
+  return new Date(when.getFullYear(), when.getMonth(), when.getDate());
+}
+
+function formatCalendarDay(when: Date): string {
   const month = String(when.getMonth() + 1).padStart(2, "0");
   const day = String(when.getDate()).padStart(2, "0");
   return `${when.getFullYear()}-${month}-${day}`;
 }
 
+/** Which day of the refund window `at` falls on (the purchase day is day 0). */
+export function dayOfRefundWindow(purchasedAtIso: string, at: Date): number {
+  const ms =
+    startOfCalendarDay(at).getTime() -
+    startOfCalendarDay(new Date(purchasedAtIso)).getTime();
+  return Math.round(ms / (24 * 60 * 60 * 1000));
+}
+
+function isWithinRefundWindow(purchasedAtIso: string, at: Date) {
+  const day = dayOfRefundWindow(purchasedAtIso, at);
+  return day >= 0 && day <= REFUND_WINDOW_DAYS;
+}
+
 /** The last calendar day (YYYY-MM-DD) on which a Refund Request can be raised. */
 export function lastDayOfRefundWindow(purchasedAtIso: string): string {
-  const deadline = new Date(purchasedAtIso);
+  const deadline = startOfCalendarDay(new Date(purchasedAtIso));
   deadline.setDate(deadline.getDate() + REFUND_WINDOW_DAYS);
-  return calendarDay(deadline);
+  return formatCalendarDay(deadline);
 }
 
 export type RefundBlocker = { message: string; status: 403 | 409 };
@@ -82,27 +112,13 @@ export function purchaseRefundBlocker(
       status: 409,
     };
   }
-  const today = calendarDay(now);
-  if (
-    today < calendarDay(new Date(purchase.createdAt)) ||
-    today > lastDayOfRefundWindow(purchase.createdAt)
-  ) {
+  if (!isWithinRefundWindow(purchase.createdAt, now)) {
     return {
       message: `The ${REFUND_WINDOW_DAYS}-day window has closed.`,
       status: 403,
     };
   }
   return null;
-}
-
-/** A Team Licence with any Claimed Seat cannot be refunded, in part or whole. */
-export function hasClaimedSeat(db: Db, purchaseId: number) {
-  const claimed = db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(and(eq(coupons.purchaseId, purchaseId), isNotNull(coupons.redeemedAt)))
-    .get();
-  return claimed !== undefined;
 }
 
 /** Why a Refund Request cannot be raised on this Team Licence, or null. */
@@ -135,15 +151,11 @@ export function requestTeamLicenceRefund(
   input: { userId: number; purchaseId: number; reason: string },
   now: Date = new Date()
 ) {
-  const seat = db
-    .select({ teamId: coupons.teamId })
-    .from(coupons)
-    .where(eq(coupons.purchaseId, input.purchaseId))
-    .get();
-  if (!seat) {
+  const teamId = teamIdOfTeamLicence(db, input.purchaseId);
+  if (teamId === undefined) {
     throw data("Team Licence not found.", { status: 404 });
   }
-  if (!isTeamAdmin(db, input.userId, seat.teamId)) {
+  if (!isTeamAdmin(db, input.userId, teamId)) {
     throw data("Only a Team Admin of this team can ask for a refund.", {
       status: 403,
     });
@@ -184,7 +196,7 @@ export function listTeamLicences(db: Db, teamId: number, now: Date = new Date())
       purchase: purchases,
       courseTitle: courses.title,
       totalSeats: sql<number>`count(${coupons.id})`,
-      claimedSeats: sql<number>`count(${coupons.redeemedAt})`,
+      claimedSeats: countClaimedSeats,
     })
     .from(coupons)
     .innerJoin(purchases, eq(coupons.purchaseId, purchases.id))
@@ -237,7 +249,7 @@ function ownPurchaseRefundBlocker(
   const blocker = purchaseRefundBlocker(db, purchase, now);
   if (blocker) return blocker;
   const { watchedSeconds } = getCourseProgress(db, userId, purchase.courseId);
-  if (watchedSeconds >= MAX_WATCHED_SECONDS) {
+  if (watchedPastRefundLimit(watchedSeconds)) {
     return {
       message: "You have watched too much of this course to request a refund.",
       status: 403,
@@ -265,20 +277,40 @@ export function ownPurchaseRefundOffer(
   };
 }
 
+/**
+ * The learner's own purchase of the course, if a Refund Request can be raised
+ * on it. Throws with the rule that blocks it otherwise, so a route can refuse
+ * before it looks at the reason.
+ */
+export function findRefundableOwnPurchase(
+  db: Db,
+  userId: number,
+  courseId: number,
+  now: Date = new Date()
+) {
+  const purchase = findOwnPurchase(db, userId, courseId);
+  if (!purchase) {
+    throw data("You have not bought this course.", { status: 403 });
+  }
+  const blocker = ownPurchaseRefundBlocker(db, userId, purchase, now);
+  if (blocker) {
+    throw data(blocker.message, { status: blocker.status });
+  }
+  return purchase;
+}
+
 /** A learner asks for the money for their own purchase of a course back. */
 export function requestOwnPurchaseRefund(
   db: Db,
   input: { userId: number; courseId: number; reason: string },
   now: Date = new Date()
 ) {
-  const purchase = findOwnPurchase(db, input.userId, input.courseId);
-  if (!purchase) {
-    throw data("You have not bought this course.", { status: 403 });
-  }
-  const blocker = ownPurchaseRefundBlocker(db, input.userId, purchase, now);
-  if (blocker) {
-    throw data(blocker.message, { status: blocker.status });
-  }
+  const purchase = findRefundableOwnPurchase(
+    db,
+    input.userId,
+    input.courseId,
+    now
+  );
 
   const request = db
     .insert(refunds)
