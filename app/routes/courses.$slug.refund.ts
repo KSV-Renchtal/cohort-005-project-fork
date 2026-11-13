@@ -8,6 +8,7 @@ import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { formatPrice } from "~/lib/utils";
 import {
+  findRefundableOwnPurchase,
   refundReasonSchema,
   requestOwnPurchaseRefund,
 } from "~/lib/refunds.server";
@@ -69,6 +70,10 @@ export async function action({ params, request }: Route.ActionArgs) {
   if (!learner) {
     throw data("User not found", { status: 404 });
   }
+
+  // Eligibility first (403/409), as before: a learner who cannot ask is told
+  // so before being told their reason is too short.
+  findRefundableOwnPurchase(db, currentUserId, course.id);
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, refundReasonSchema);

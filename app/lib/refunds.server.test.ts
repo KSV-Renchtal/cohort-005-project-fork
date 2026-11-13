@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { buyCourse, claimSeat, findEnrollment } from "./enrollments.server";
 import { decideRefundRequest } from "./admin-refunds.server";
 import {
+  findRefundableOwnPurchase,
   listTeamLicences,
   ownPurchaseRefundOffer,
   requestOwnPurchaseRefund,
@@ -450,5 +451,40 @@ describe("ownPurchaseRefundOffer", () => {
 
     expect(ownPurchaseRefundOffer(db, buyer.id, course.id)).toBeNull();
     expect(ownPurchaseRefundOffer(db, learner.id, course.id)).toBeNull();
+  });
+});
+
+describe("findRefundableOwnPurchase", () => {
+  it("returns the learner's own purchase when a Refund Request can be raised on it", () => {
+    const { db, course, learner } = ownPurchaseSetup();
+
+    expect(findRefundableOwnPurchase(db, learner.id, course.id)).toMatchObject({
+      userId: learner.id,
+      courseId: course.id,
+      amountPaid: 7900,
+    });
+  });
+
+  it("refuses, before any reason is looked at, when a rule blocks the request", () => {
+    const { db, course, learner, lesson } = ownPurchaseSetup();
+    watch(db, learner.id, lesson.id, 2 * 60 * 60);
+
+    expect(
+      rejection(() => findRefundableOwnPurchase(db, learner.id, course.id))
+    ).toMatchObject({
+      data: "You have watched too much of this course to request a refund.",
+      init: { status: 403 },
+    });
+  });
+
+  it("refuses a learner who did not buy the course", () => {
+    const { db, course, admin } = ownPurchaseSetup();
+
+    expect(
+      rejection(() => findRefundableOwnPurchase(db, admin.id, course.id))
+    ).toMatchObject({
+      data: "You have not bought this course.",
+      init: { status: 403 },
+    });
   });
 });

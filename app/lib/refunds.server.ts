@@ -277,20 +277,40 @@ export function ownPurchaseRefundOffer(
   };
 }
 
+/**
+ * The learner's own purchase of the course, if a Refund Request can be raised
+ * on it. Throws with the rule that blocks it otherwise, so a route can refuse
+ * before it looks at the reason.
+ */
+export function findRefundableOwnPurchase(
+  db: Db,
+  userId: number,
+  courseId: number,
+  now: Date = new Date()
+) {
+  const purchase = findOwnPurchase(db, userId, courseId);
+  if (!purchase) {
+    throw data("You have not bought this course.", { status: 403 });
+  }
+  const blocker = ownPurchaseRefundBlocker(db, userId, purchase, now);
+  if (blocker) {
+    throw data(blocker.message, { status: blocker.status });
+  }
+  return purchase;
+}
+
 /** A learner asks for the money for their own purchase of a course back. */
 export function requestOwnPurchaseRefund(
   db: Db,
   input: { userId: number; courseId: number; reason: string },
   now: Date = new Date()
 ) {
-  const purchase = findOwnPurchase(db, input.userId, input.courseId);
-  if (!purchase) {
-    throw data("You have not bought this course.", { status: 403 });
-  }
-  const blocker = ownPurchaseRefundBlocker(db, input.userId, purchase, now);
-  if (blocker) {
-    throw data(blocker.message, { status: blocker.status });
-  }
+  const purchase = findRefundableOwnPurchase(
+    db,
+    input.userId,
+    input.courseId,
+    now
+  );
 
   const request = db
     .insert(refunds)
