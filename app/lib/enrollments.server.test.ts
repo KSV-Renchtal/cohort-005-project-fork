@@ -3,6 +3,8 @@ import { createTestDb, seedBaseData } from "~/test/setup";
 import type { Db } from "~/db";
 import * as schema from "~/db/schema";
 import { buyCourse, claimSeat, findEnrollment } from "./enrollments.server";
+import { requestTeamLicenceRefund } from "./refunds.server";
+import { decideRefundRequest } from "./admin-refunds.server";
 
 function setup() {
   const db = createTestDb();
@@ -144,5 +146,83 @@ describe("a learner has at most one Enrollment per course", () => {
         })
         .run()
     ).toThrow(/UNIQUE/);
+  });
+});
+
+function openTeamLicenceRefund(
+  db: Db,
+  teamAdminId: number,
+  licence: ReturnType<typeof createTeamLicence>
+) {
+  db.insert(schema.teamMembers)
+    .values({
+      teamId: licence.team.id,
+      userId: teamAdminId,
+      role: schema.TeamMemberRole.Admin,
+    })
+    .run();
+  return requestTeamLicenceRefund(db, {
+    userId: teamAdminId,
+    purchaseId: licence.purchase.id,
+    reason: "We no longer need these places.",
+  });
+}
+
+describe("Unclaimed Seats of a Team Licence with a Refund Request", () => {
+  it("cannot be claimed while the Refund Request is Open", () => {
+    const { db, user, course, teamAdmin } = setup();
+    const licence = createTeamLicence(db, teamAdmin.id, course.id, ["SEAT-1"]);
+    openTeamLicenceRefund(db, teamAdmin.id, licence);
+
+    const refused = claimSeat(db, {
+      code: "SEAT-1",
+      userId: user.id,
+      userCountry: "US",
+    });
+
+    expect(refused).toEqual({
+      ok: false,
+      error:
+        "This place is currently locked while a refund request is reviewed.",
+    });
+    expect(findEnrollment(db, user.id, course.id)).toBeUndefined();
+  });
+
+  it("can be claimed again after the Refund Request is declined", () => {
+    const { db, user, course, teamAdmin } = setup();
+    const licence = createTeamLicence(db, teamAdmin.id, course.id, ["SEAT-1"]);
+    const request = openTeamLicenceRefund(db, teamAdmin.id, licence);
+    decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "decline",
+      adminUserId: teamAdmin.id,
+    });
+
+    expect(
+      claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" }).ok
+    ).toBe(true);
+  });
+
+  it("are void after the Refund Request is approved", () => {
+    const { db, user, course, teamAdmin } = setup();
+    const licence = createTeamLicence(db, teamAdmin.id, course.id, ["SEAT-1"]);
+    const request = openTeamLicenceRefund(db, teamAdmin.id, licence);
+    decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "approve",
+      adminUserId: teamAdmin.id,
+    });
+
+    const refused = claimSeat(db, {
+      code: "SEAT-1",
+      userId: user.id,
+      userCountry: "US",
+    });
+
+    expect(refused).toEqual({
+      ok: false,
+      error: "This place was refunded and is no longer valid",
+    });
+    expect(findEnrollment(db, user.id, course.id)).toBeUndefined();
   });
 });

@@ -1,7 +1,13 @@
 import { data } from "react-router";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "~/db";
-import { coupons, enrollments, purchases } from "~/db/schema";
+import {
+  coupons,
+  enrollments,
+  purchases,
+  refunds,
+  RefundStatus,
+} from "~/db/schema";
 
 // Every Enrollment records its source: the learner's own purchase or a
 // Claimed Seat. A learner has at most one Enrollment per course.
@@ -46,6 +52,36 @@ export function buyCourse(
   });
 }
 
+export const VOIDED_SEAT_MESSAGE =
+  "This place was refunded and is no longer valid";
+
+export const FROZEN_SEAT_MESSAGE =
+  "This place is currently locked while a refund request is reviewed.";
+
+/**
+ * Why nobody can claim this Unclaimed Seat, or null: it was voided when its
+ * Team Licence was refunded, or it is frozen while that Team Licence has an
+ * Open Refund Request.
+ */
+export function seatLockMessage(
+  db: Db,
+  seat: { purchaseId: number; voidedAt: string | null }
+): string | null {
+  if (seat.voidedAt !== null) return VOIDED_SEAT_MESSAGE;
+  const openRequest = db
+    .select({ id: refunds.id })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, seat.purchaseId),
+        eq(refunds.status, RefundStatus.Open)
+      )
+    )
+    .get();
+  if (openRequest) return FROZEN_SEAT_MESSAGE;
+  return null;
+}
+
 export type ClaimSeatResult =
   | { ok: true; enrollment: typeof enrollments.$inferSelect }
   | { ok: false; error: string };
@@ -67,6 +103,11 @@ export function claimSeat(
 
     if (seat.redeemedByUserId !== null) {
       return { ok: false, error: "Coupon has already been redeemed" };
+    }
+
+    const lockMessage = seatLockMessage(tx, seat);
+    if (lockMessage) {
+      return { ok: false, error: lockMessage };
     }
 
     if (findEnrollment(tx, input.userId, seat.courseId)) {
