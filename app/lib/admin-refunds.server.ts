@@ -1,9 +1,11 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { data } from "react-router";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "~/db";
 import {
   LessonProgressStatus,
   RefundStatus,
   coupons,
+  enrollments,
   courses,
   lessonProgress,
   lessons,
@@ -145,4 +147,72 @@ function progressFor(
     ...progress,
     overWatchLimit: progress.watchedSeconds >= MAX_WATCHED_SECONDS,
   };
+}
+
+export type RefundDecision = "approve" | "decline";
+
+/**
+ * A Platform Admin approves or declines an Open Refund Request. Decisions are
+ * final.
+ */
+export function decideRefundRequest(
+  db: Db,
+  input: {
+    refundId: number;
+    decision: RefundDecision;
+    adminUserId: number;
+    now?: string;
+  }
+) {
+  const resolvedAt = input.now ?? new Date().toISOString();
+  return db.transaction((tx) => {
+    const request = tx
+      .select({ purchaseId: refunds.purchaseId, amountPaid: purchases.amountPaid })
+      .from(refunds)
+      .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+      .where(eq(refunds.id, input.refundId))
+      .get();
+    if (!request) {
+      throw data("Refund Request not found.", { status: 404 });
+    }
+
+    // First decision wins: the update only matches while the request is
+    // still Open, so a second Platform Admin's decision changes nothing.
+    const approve = input.decision === "approve";
+    const decided = tx
+      .update(refunds)
+      .set({
+        status: approve ? RefundStatus.Approved : RefundStatus.Declined,
+        amountRefunded: approve ? request.amountPaid : null,
+        resolvedAt,
+        resolvedByUserId: input.adminUserId,
+      })
+      .where(
+        and(eq(refunds.id, input.refundId), eq(refunds.status, RefundStatus.Open))
+      )
+      .returning()
+      .get();
+    if (!decided) {
+      throw data("This Refund Request was already decided.", { status: 409 });
+    }
+
+    if (approve) {
+      // Access ends at approval (ADR 0001): only the Enrollment that came
+      // from this purchase. Learning progress is per user and lesson, so it
+      // stays.
+      tx.delete(enrollments)
+        .where(eq(enrollments.purchaseId, request.purchaseId))
+        .run();
+      tx.update(coupons)
+        .set({ voidedAt: resolvedAt })
+        .where(
+          and(
+            eq(coupons.purchaseId, request.purchaseId),
+            isNull(coupons.redeemedByUserId)
+          )
+        )
+        .run();
+    }
+    return decided;
+  });
 }

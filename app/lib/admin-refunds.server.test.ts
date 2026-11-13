@@ -2,8 +2,12 @@ import { describe, it, expect } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import type { Db } from "~/db";
 import * as schema from "~/db/schema";
-import { buyCourse, claimSeat } from "./enrollments.server";
-import { listOpenRefundRequests } from "./admin-refunds.server";
+import { buyCourse, claimSeat, findEnrollment } from "./enrollments.server";
+import {
+  decideRefundRequest,
+  getCourseProgress,
+  listOpenRefundRequests,
+} from "./admin-refunds.server";
 
 function setup() {
   const db = createTestDb();
@@ -205,5 +209,210 @@ describe("listOpenRefundRequests", () => {
       claimedSeats: 1,
       totalSeats: 3,
     });
+  });
+});
+
+function addAdmin(db: Db, name = "Pat") {
+  return db
+    .insert(schema.users)
+    .values({
+      name,
+      email: `${name.toLowerCase()}@cadence.example`,
+      role: schema.UserRole.Admin,
+    })
+    .returning()
+    .get();
+}
+
+describe("decideRefundRequest", () => {
+  it("declining records who decided and when, refunds nothing and keeps the Enrollment", () => {
+    const { db, user, course } = setup();
+    const admin = addAdmin(db);
+    const { purchase } = buyCourse(db, {
+      userId: user.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: "US",
+    });
+    const request = requestRefund(db, purchase.id, {
+      requestedAt: "2026-11-04T12:00:00.000Z",
+    });
+
+    const decided = decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "decline",
+      adminUserId: admin.id,
+      now: "2026-11-05T09:00:00.000Z",
+    });
+
+    expect(decided).toMatchObject({
+      status: schema.RefundStatus.Declined,
+      resolvedAt: "2026-11-05T09:00:00.000Z",
+      resolvedByUserId: admin.id,
+      amountRefunded: null,
+    });
+    expect(findEnrollment(db, user.id, course.id)).toBeDefined();
+    expect(listOpenRefundRequests(db)).toEqual([]);
+  });
+
+  it("approving refunds the full amount paid and ends the Enrollment from that purchase", () => {
+    const { db, user, course } = setup();
+    const admin = addAdmin(db);
+    const { purchase } = buyCourse(db, {
+      userId: user.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: "US",
+    });
+    const request = requestRefund(db, purchase.id, {
+      requestedAt: "2026-11-04T12:00:00.000Z",
+    });
+
+    const decided = decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "approve",
+      adminUserId: admin.id,
+      now: "2026-11-05T09:00:00.000Z",
+    });
+
+    expect(decided).toMatchObject({
+      status: schema.RefundStatus.Approved,
+      resolvedAt: "2026-11-05T09:00:00.000Z",
+      resolvedByUserId: admin.id,
+      amountRefunded: 7900,
+    });
+    expect(findEnrollment(db, user.id, course.id)).toBeUndefined();
+  });
+
+  it("approving keeps learning progress and is not blocked by watch time over the limit", () => {
+    const { db, user, course } = setup();
+    const admin = addAdmin(db);
+    const lesson = addLesson(db, course.id, 1);
+    const { purchase } = buyCourse(db, {
+      userId: user.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: "US",
+    });
+    watch(db, user.id, lesson.id, 3 * 60 * 60);
+    db.insert(schema.lessonProgress)
+      .values({
+        userId: user.id,
+        lessonId: lesson.id,
+        status: schema.LessonProgressStatus.Completed,
+      })
+      .run();
+    const request = requestRefund(db, purchase.id, {
+      requestedAt: "2026-11-04T12:00:00.000Z",
+    });
+
+    const decided = decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "approve",
+      adminUserId: admin.id,
+    });
+
+    expect(decided.status).toBe(schema.RefundStatus.Approved);
+    expect(getCourseProgress(db, user.id, course.id)).toEqual({
+      watchedSeconds: 3 * 60 * 60,
+      completedLessons: 1,
+      totalLessons: 1,
+    });
+  });
+
+  it("approving a Team Licence voids its Unclaimed Seats and keeps the Team Admin's own Enrollment", () => {
+    const { db, user: ava, course } = setup();
+    const admin = addAdmin(db);
+    const own = buyCourse(db, {
+      userId: ava.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: "US",
+    });
+    const team = db.insert(schema.teams).values({}).returning().get();
+    const licence = db
+      .insert(schema.purchases)
+      .values({ userId: ava.id, courseId: course.id, amountPaid: 23700, country: null })
+      .returning()
+      .get();
+    for (const code of ["SEAT-1", "SEAT-2", "SEAT-3"]) {
+      db.insert(schema.coupons)
+        .values({ teamId: team.id, courseId: course.id, code, purchaseId: licence.id })
+        .run();
+    }
+    const otherLicence = db
+      .insert(schema.purchases)
+      .values({ userId: ava.id, courseId: course.id, amountPaid: 7900, country: null })
+      .returning()
+      .get();
+    db.insert(schema.coupons)
+      .values({ teamId: team.id, courseId: course.id, code: "OTHER-1", purchaseId: otherLicence.id })
+      .run();
+    const request = requestRefund(db, licence.id, {
+      requestedAt: "2026-11-04T12:00:00.000Z",
+    });
+
+    const decided = decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "approve",
+      adminUserId: admin.id,
+      now: "2026-11-05T09:00:00.000Z",
+    });
+
+    expect(decided.amountRefunded).toBe(23700);
+    const seats = db.select().from(schema.coupons).all();
+    expect(
+      Object.fromEntries(seats.map((seat) => [seat.code, seat.voidedAt]))
+    ).toEqual({
+      "SEAT-1": "2026-11-05T09:00:00.000Z",
+      "SEAT-2": "2026-11-05T09:00:00.000Z",
+      "SEAT-3": "2026-11-05T09:00:00.000Z",
+      "OTHER-1": null,
+    });
+    expect(findEnrollment(db, ava.id, course.id)?.purchaseId).toBe(
+      own.purchase.id
+    );
+  });
+
+  it("rejects a second decision with \"already decided\" and the first one stands", () => {
+    const { db, user, course } = setup();
+    const first = addAdmin(db, "Pat");
+    const second = addAdmin(db, "Sam");
+    const { purchase } = buyCourse(db, {
+      userId: user.id,
+      courseId: course.id,
+      amountPaid: 7900,
+      country: "US",
+    });
+    const request = requestRefund(db, purchase.id, {
+      requestedAt: "2026-11-04T12:00:00.000Z",
+    });
+    decideRefundRequest(db, {
+      refundId: request.id,
+      decision: "decline",
+      adminUserId: first.id,
+    });
+
+    let rejection: unknown;
+    try {
+      decideRefundRequest(db, {
+        refundId: request.id,
+        decision: "approve",
+        adminUserId: second.id,
+      });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toMatchObject({
+      data: "This Refund Request was already decided.",
+      init: { status: 409 },
+    });
+    const stored = db.select().from(schema.refunds).get();
+    expect(stored).toMatchObject({
+      status: schema.RefundStatus.Declined,
+      resolvedByUserId: first.id,
+    });
+    expect(findEnrollment(db, user.id, course.id)).toBeDefined();
   });
 });
