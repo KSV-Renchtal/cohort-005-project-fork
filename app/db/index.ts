@@ -1,5 +1,8 @@
 import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import {
+  drizzle,
+  type BetterSQLite3Database,
+} from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema";
 
 // The connection is opened lazily, on first use. Opening it at module scope
@@ -38,6 +41,13 @@ function openDatabase(filename: string) {
     throw error;
   }
 }
+
+/**
+ * The type of `db`. Functions that touch the database take one as their first
+ * parameter, so tests can pass an in-memory database from `createTestDb()` in
+ * `app/test/setup.ts` instead of `data.db`.
+ */
+export type Db = BetterSQLite3Database<typeof schema>;
 
 let instance: ReturnType<typeof drizzle<typeof schema>> | undefined;
 
