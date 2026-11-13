@@ -8,12 +8,16 @@ import { resolveCountry } from "~/lib/country.server";
 import { parseParams, parseFormData } from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
-import { Ticket, AlertCircle, CheckCircle2, Globe } from "lucide-react";
+import { Ticket, AlertCircle, CheckCircle2, Globe, Lock } from "lucide-react";
 import { data } from "react-router";
 import { db } from "~/db";
 import { purchases, coupons, courses } from "~/db/schema";
 import { eq } from "drizzle-orm";
-import { claimSeat, findEnrollment } from "~/lib/enrollments.server";
+import {
+  claimSeat,
+  findEnrollment,
+  seatLockMessage,
+} from "~/lib/enrollments.server";
 
 function getCourseById(id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
@@ -65,10 +69,12 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   const alreadyRedeemed = coupon.redeemedByUserId !== null;
   const alreadyEnrolled = isUserEnrolled(currentUserId, coupon.courseId);
+  const lockMessage = alreadyRedeemed ? null : seatLockMessage(db, coupon);
+  const voided = coupon.voidedAt !== null;
 
   // Check country mismatch upfront so we can show a clear message
   let countryMismatch = false;
-  if (!alreadyRedeemed && !alreadyEnrolled) {
+  if (!alreadyRedeemed && !alreadyEnrolled && !lockMessage) {
     const userCountry = await resolveCountry(request);
     const purchase = db
       .select()
@@ -86,6 +92,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     alreadyRedeemed,
     alreadyEnrolled,
     countryMismatch,
+    lockMessage,
+    voided,
   };
 }
 
@@ -127,8 +135,15 @@ export default function Redeem({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
-  const { course, code, alreadyRedeemed, alreadyEnrolled, countryMismatch } =
-    loaderData;
+  const {
+    course,
+    code,
+    alreadyRedeemed,
+    alreadyEnrolled,
+    countryMismatch,
+    lockMessage,
+    voided,
+  } = loaderData;
   const fetcher = useFetcher();
   const isSubmitting = fetcher.state !== "idle";
 
@@ -141,8 +156,6 @@ export default function Redeem({
   }, [fetcher.data, actionData]);
 
   // Determine which state to show
-  const canRedeem = !alreadyRedeemed && !alreadyEnrolled && !countryMismatch;
-
   return (
     <div className="mx-auto max-w-2xl p-6 lg:p-8">
       <h1 className="mb-2 text-2xl font-bold">Redeem Coupon</h1>
@@ -173,6 +186,24 @@ export default function Redeem({
               <p className="mt-2 text-sm text-muted-foreground">
                 Someone has already claimed this seat. Please ask the person who
                 shared this link for a new coupon.
+              </p>
+            </div>
+          ) : lockMessage ? (
+            <div className="rounded-lg bg-destructive/10 p-4">
+              <div className="flex items-center justify-center gap-2 text-destructive">
+                {voided ? (
+                  <AlertCircle className="size-5" />
+                ) : (
+                  <Lock className="size-5" />
+                )}
+                <span className="font-medium">
+                  {voided ? lockMessage : "This place is currently locked"}
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {voided
+                  ? "The Team Licence this place belonged to was refunded. Please ask the person who shared this link for a new one."
+                  : `${lockMessage} Please try again later.`}
               </p>
             </div>
           ) : alreadyEnrolled ? (
