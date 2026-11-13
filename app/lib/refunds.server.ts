@@ -1,4 +1,5 @@
 import { data } from "react-router";
+import { MAX_WATCHED_SECONDS, REFUND_WINDOW_DAYS } from "~/lib/refund-rules";
 import { z } from "zod";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "~/db";
@@ -34,10 +35,7 @@ function isTeamAdmin(db: Db, userId: number, teamId: number) {
   return membership !== undefined;
 }
 
-export const REFUND_WINDOW_DAYS = 14;
-
-/** A learner who watched this much of a course cannot ask for their own purchase back. */
-export const MAX_WATCHED_SECONDS = 2 * 60 * 60;
+export { REFUND_WINDOW_DAYS, MAX_WATCHED_SECONDS };
 
 /** Whether the learner watched too much of the course to ask for their own purchase back. */
 export function watchedPastRefundLimit(watchedSeconds: number) {

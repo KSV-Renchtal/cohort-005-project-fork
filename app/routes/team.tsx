@@ -297,7 +297,11 @@ export default function Team({ loaderData }: Route.ComponentProps) {
                     <p className="text-xs text-muted-foreground">
                       {licence.totalSeats} seats ·{" "}
                       {formatPrice(licence.amountPaid)} · bought{" "}
-                      {new Date(licence.purchasedAt).toLocaleDateString()}
+                      {new Date(licence.purchasedAt).toLocaleDateString("en-US", {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                      })}
                     </p>
                     {licence.latestRefundRequest && (
                       <p className="mt-1 text-xs text-muted-foreground">

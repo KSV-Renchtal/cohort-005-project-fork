@@ -10,7 +10,7 @@ import {
   decideRefundRequest,
   listOpenRefundRequests,
 } from "~/lib/admin-refunds.server";
-import { MAX_WATCHED_SECONDS, REFUND_WINDOW_DAYS } from "~/lib/refunds.server";
+import { MAX_WATCHED_SECONDS, REFUND_WINDOW_DAYS } from "~/lib/refund-rules";
 import { formatPrice } from "~/lib/utils";
 import { parseFormData } from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
@@ -80,7 +80,7 @@ function formatWatchTime(seconds: number) {
 }
 
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString(undefined, {
+  return new Date(iso).toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",
