@@ -1,11 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
-import {
-  hasClaimedSeat,
-  lastDayOfRefundWindow,
-  purchaseRefundBlocker,
-} from "~/lib/refunds.server";
+import { ownPurchaseRefundOffer } from "~/lib/refunds.server";
+import { getCourseProgress } from "~/lib/admin-refunds.server";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";
@@ -19,12 +16,9 @@ import {
   enrollments,
   lessonProgress,
   courseRatings,
-  purchases,
-  refunds,
-  videoWatchEvents,
   LessonProgressStatus,
 } from "~/db/schema";
-import { eq, and, or, sql, inArray } from "drizzle-orm";
+import { eq, and, or, sql } from "drizzle-orm";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -369,84 +363,29 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
-const REFUND_WATCH_LIMIT_SECONDS = 2 * 60 * 60;
 const REFUND_COMPLETION_LIMIT = 0.5;
 
-function getPurchaseForCourse(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(purchases)
-    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
-    .orderBy(sql`${purchases.createdAt} desc`)
-    .get();
-}
-
-function getCompletedLessonCount(userId: number, lessonIds: number[]) {
-  if (lessonIds.length === 0) return 0;
-
-  const result = db
-    .select({ count: sql<number>`count(*)` })
-    .from(lessonProgress)
-    .where(
-      and(
-        eq(lessonProgress.userId, userId),
-        eq(lessonProgress.status, LessonProgressStatus.Completed),
-        inArray(lessonProgress.lessonId, lessonIds)
-      )
-    )
-    .get();
-
-  return result?.count ?? 0;
-}
-
-function getSecondsWatched(userId: number, lessonIds: number[]) {
-  if (lessonIds.length === 0) return 0;
-
-  const furthestPerLesson = db
-    .select({
-      furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
-    })
-    .from(videoWatchEvents)
-    .where(
-      and(
-        eq(videoWatchEvents.userId, userId),
-        inArray(videoWatchEvents.lessonId, lessonIds)
-      )
-    )
-    .groupBy(videoWatchEvents.lessonId)
-    .all();
-
-  return furthestPerLesson.reduce((total, row) => total + row.furthest, 0);
-}
-
 /**
- * What the learner is offered if they want their money back, or null if this
- * purchase cannot be refunded.
+ * What the learner is offered if they want the money for their own purchase
+ * back, or null. Never a Team Licence: the box only covers own purchases.
  */
 function getRefundOffer(userId: number, course: { id: number }) {
-  const purchase = getPurchaseForCourse(userId, course.id);
+  const offer = ownPurchaseRefundOffer(db, userId, course.id);
+  if (!offer) return null;
 
-  if (!purchase) return null;
-  if (purchaseRefundBlocker(db, purchase)) return null;
-  if (hasClaimedSeat(db, purchase.id)) return null;
-
-  const lessonIds = getCourseLessonIds(course.id);
-
-  if (lessonIds.length > 0) {
-    const completedCount = getCompletedLessonCount(userId, lessonIds);
-    if (completedCount / lessonIds.length >= REFUND_COMPLETION_LIMIT) {
-      return null;
-    }
-  }
-
-  if (getSecondsWatched(userId, lessonIds) >= REFUND_WATCH_LIMIT_SECONDS) {
+  const { completedLessons, totalLessons } = getCourseProgress(
+    db,
+    userId,
+    course.id
+  );
+  if (
+    totalLessons > 0 &&
+    completedLessons / totalLessons >= REFUND_COMPLETION_LIMIT
+  ) {
     return null;
   }
 
-  return {
-    amount: purchase.amountPaid,
-    lastDayInWindow: lastDayOfRefundWindow(purchase.createdAt),
-  };
+  return offer;
 }
 
 const ratingSchema = z.object({
