@@ -1,9 +1,12 @@
-import { useState } from "react";
-import { Link } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useFetcher } from "react-router";
+import { toast } from "sonner";
+import { z } from "zod";
 import type { Route } from "./+types/team";
 import { getCurrentUserId } from "~/lib/session";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { Textarea } from "~/components/ui/textarea";
 import { Users, BookOpen, Copy, Check, AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { db } from "~/db";
@@ -16,6 +19,13 @@ import {
   TeamMemberRole,
 } from "~/db/schema";
 import { eq, and } from "drizzle-orm";
+import {
+  listTeamLicences,
+  refundReasonSchema,
+  requestTeamLicenceRefund,
+} from "~/lib/refunds.server";
+import { parseFormData } from "~/lib/validation";
+import { formatPrice } from "~/lib/utils";
 
 function getTeamForAdmin(userId: number) {
   const membership = db
@@ -145,7 +155,31 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courseStats, couponRows };
+  const licences = listTeamLicences(db, team.id);
+
+  return { courseStats, couponRows, licences };
+}
+
+const teamLicenceRefundSchema = refundReasonSchema.extend({
+  purchaseId: z.coerce.number().int().positive(),
+});
+
+export async function action({ request }: Route.ActionArgs) {
+  const currentUserId = await getCurrentUserId(request);
+
+  if (!currentUserId) {
+    throw data("Select a user from the DevUI panel.", { status: 401 });
+  }
+
+  const parsed = parseFormData(await request.formData(), teamLicenceRefundSchema);
+
+  if (!parsed.success) {
+    return data({ errors: parsed.errors }, { status: 400 });
+  }
+
+  requestTeamLicenceRefund(db, { userId: currentUserId, ...parsed.data });
+
+  return { errors: null };
 }
 
 function CopyButton({ code }: { code: string }) {
@@ -180,8 +214,64 @@ function CopyButton({ code }: { code: string }) {
   );
 }
 
+function TeamLicenceRefund({
+  purchaseId,
+  amount,
+  lastDayInWindow,
+}: {
+  purchaseId: number;
+  amount: number;
+  lastDayInWindow: string;
+}) {
+  const fetcher = useFetcher<{ errors: Record<string, string> | null }>();
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const isSubmitting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    const firstError = Object.values(fetcher.data.errors ?? {})[0];
+    if (firstError) {
+      toast.error(firstError);
+    } else {
+      toast.success("Refund requested. We will email you when it is decided.");
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  if (!isFormOpen) {
+    return (
+      <Button variant="outline" size="sm" onClick={() => setIsFormOpen(true)}>
+        Request a refund
+      </Button>
+    );
+  }
+
+  return (
+    <fetcher.Form method="post" className="space-y-2">
+      <p className="text-xs text-muted-foreground">
+        Refunds the full {formatPrice(amount)} and ends every seat of this
+        licence. You can ask until {lastDayInWindow}.
+      </p>
+      <input type="hidden" name="purchaseId" value={purchaseId} />
+      <Textarea name="reason" rows={3} required placeholder="What went wrong?" />
+      <div className="flex gap-2">
+        <Button type="submit" size="sm" disabled={isSubmitting}>
+          {isSubmitting ? "Sending..." : "Request a refund"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setIsFormOpen(false)}
+        >
+          Keep it
+        </Button>
+      </div>
+    </fetcher.Form>
+  );
+}
+
 export default function Team({ loaderData }: Route.ComponentProps) {
-  const { courseStats, couponRows } = loaderData;
+  const { courseStats, couponRows, licences } = loaderData;
   const [courseFilter, setCourseFilter] = useState<number | "all">("all");
 
   const filteredCoupons =
@@ -240,6 +330,47 @@ export default function Team({ loaderData }: Route.ComponentProps) {
               </CardContent>
             </Card>
           ))}
+        </div>
+      )}
+
+      {/* Team Licences */}
+      {licences.length > 0 && (
+        <div className="mb-8">
+          <h2 className="mb-4 text-lg font-semibold">Team Licences</h2>
+          <div className="space-y-3">
+            {licences.map((licence) => (
+              <Card key={licence.purchaseId}>
+                <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <p className="font-medium">{licence.courseTitle}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {licence.totalSeats} seats ·{" "}
+                      {formatPrice(licence.amountPaid)} · bought{" "}
+                      {new Date(licence.purchasedAt).toLocaleDateString()}
+                    </p>
+                    {licence.latestRefundRequest && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Refund request: {licence.latestRefundRequest.status}
+                      </p>
+                    )}
+                  </div>
+                  <div className="sm:max-w-sm">
+                    {licence.refundOffer ? (
+                      <TeamLicenceRefund
+                        purchaseId={licence.purchaseId}
+                        amount={licence.amountPaid}
+                        lastDayInWindow={licence.refundOffer.lastDayInWindow}
+                      />
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        {licence.refundBlockedBecause}
+                      </p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         </div>
       )}
 
