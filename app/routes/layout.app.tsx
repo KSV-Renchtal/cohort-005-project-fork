@@ -5,11 +5,11 @@ import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
-import { eq, and, or, sql, desc } from "drizzle-orm";
+import { eq, and, or, sql } from "drizzle-orm";
 import { db } from "~/db";
+import { listRecentlyProgressedCourses } from "~/lib/recent-courses.server";
 import {
   users,
-  courses,
   modules,
   lessons,
   lessonProgress,
@@ -151,26 +151,6 @@ function getTotalLessonCount(courseId: number) {
   return getCourseLessonIds(courseId).length;
 }
 
-function getRecentlyProgressedCourses(userId: number, limit: number = 3) {
-  return db
-    .select({
-      courseId: courses.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      coverImageUrl: courses.coverImageUrl,
-      lastActivityId: sql<number>`max(${lessonProgress.id})`,
-    })
-    .from(lessonProgress)
-    .innerJoin(lessons, eq(lessonProgress.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(eq(lessonProgress.userId, userId))
-    .groupBy(courses.id)
-    .orderBy(desc(sql`max(${lessonProgress.id})`))
-    .limit(limit)
-    .all();
-}
-
 export async function loader({ request }: Route.LoaderArgs) {
   const users = getAllUsers();
   const currentUserId = await getCurrentUserId(request);
@@ -179,7 +159,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const countryTierInfo = getCountryTierInfo(devCountry);
 
   const recentCourses = currentUserId
-    ? getRecentlyProgressedCourses(currentUserId).map((course) => {
+    ? listRecentlyProgressedCourses(db, currentUserId).map((course) => {
         const completedLessons = getCompletedLessonCount(
           currentUserId,
           course.courseId
