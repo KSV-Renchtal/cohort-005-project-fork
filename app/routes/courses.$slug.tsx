@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Link, useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { ownPurchaseRefundOffer } from "~/lib/refunds.server";
-import { getCourseProgress } from "~/lib/course-progress.server";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";
@@ -363,30 +362,6 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
-const REFUND_COMPLETION_LIMIT = 0.5;
-
-/**
- * What the learner is offered if they want the money for their own purchase
- * back, or null. Never a Team Licence: the box only covers own purchases.
- */
-function getRefundOffer(userId: number, course: { id: number }) {
-  const offer = ownPurchaseRefundOffer(db, userId, course.id);
-  if (!offer) return null;
-
-  const { completedLessons, totalLessons } = getCourseProgress(
-    db,
-    userId,
-    course.id
-  );
-  if (
-    totalLessons > 0 &&
-    completedLessons / totalLessons >= REFUND_COMPLETION_LIMIT
-  ) {
-    return null;
-  }
-
-  return offer;
-}
 
 const ratingSchema = z.object({
   rating: z.coerce.number().int().min(MIN_RATING).max(MAX_RATING),
@@ -426,7 +401,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     enrolled = isUserEnrolled(currentUserId, course.id);
 
     if (enrolled) {
-      refundOffer = getRefundOffer(currentUserId, { id: course.id });
+      refundOffer = ownPurchaseRefundOffer(db, currentUserId, course.id);
 
       progress = calculateProgress(currentUserId, course.id, false);
 
