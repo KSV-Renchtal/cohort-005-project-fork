@@ -2,9 +2,19 @@ import { describe, it, expect } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import type { Db } from "~/db";
 import * as schema from "~/db/schema";
+import { eq } from "drizzle-orm";
 import { buyCourse, claimSeat, findEnrollment } from "./enrollments.server";
 import { requestTeamLicenceRefund } from "./refunds.server";
 import { decideRefundRequest } from "./admin-refunds.server";
+
+function rejection(fn: () => unknown) {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the claim to be rejected");
+}
 
 function setup() {
   const db = createTestDb();
@@ -78,10 +88,60 @@ describe("claimSeat", () => {
       userCountry: "US",
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.couponId).toBe(seats[0].id);
     const enrollment = findEnrollment(db, user.id, course.id);
     expect(enrollment?.couponId).toBe(seats[0].id);
     expect(enrollment?.purchaseId).toBeNull();
+  });
+
+  it("refuses a code that matches no Unclaimed Seat", () => {
+    const { db, user } = setup();
+
+    expect(
+      rejection(() =>
+        claimSeat(db, { code: "NOPE", userId: user.id, userCountry: "US" })
+      )
+    ).toMatchObject({
+      data: "No Unclaimed Seat matches this link.",
+      init: { status: 404 },
+    });
+  });
+
+  it("refuses a Claimed Seat", () => {
+    const { db, user, course, teamAdmin } = setup();
+    createTeamLicence(db, teamAdmin.id, course.id, ["SEAT-1"]);
+    const noah = addLearner(db, "noah@example.com");
+    claimSeat(db, { code: "SEAT-1", userId: noah.id, userCountry: "US" });
+
+    expect(
+      rejection(() =>
+        claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" })
+      )
+    ).toMatchObject({
+      data: "This place is already a Claimed Seat.",
+      init: { status: 409 },
+    });
+  });
+
+  it("refuses a learner outside the purchaser's country", () => {
+    const { db, user, course, teamAdmin } = setup();
+    const { purchase } = createTeamLicence(db, teamAdmin.id, course.id, [
+      "SEAT-1",
+    ]);
+    db.update(schema.purchases)
+      .set({ country: "DE" })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+
+    expect(
+      rejection(() =>
+        claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" })
+      )
+    ).toMatchObject({
+      data: "This Unclaimed Seat can only be claimed from the purchaser's country.",
+      init: { status: 403 },
+    });
+    expect(findEnrollment(db, user.id, course.id)).toBeUndefined();
   });
 });
 
@@ -111,20 +171,17 @@ describe("a learner has at most one Enrollment per course", () => {
       country: "US",
     });
 
-    const refused = claimSeat(db, {
-      code: "SEAT-1",
-      userId: user.id,
-      userCountry: "US",
-    });
-
-    expect(refused).toEqual({
-      ok: false,
-      error: "You are already enrolled in this course",
+    expect(
+      rejection(() =>
+        claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" })
+      )
+    ).toMatchObject({
+      data: "You are already enrolled in this course",
+      init: { status: 409 },
     });
     const noah = addLearner(db, "noah@example.com");
-    expect(
-      claimSeat(db, { code: "SEAT-1", userId: noah.id, userCountry: "US" }).ok
-    ).toBe(true);
+    claimSeat(db, { code: "SEAT-1", userId: noah.id, userCountry: "US" });
+    expect(findEnrollment(db, noah.id, course.id)).toBeDefined();
   });
 
   it("is enforced by the database too", () => {
@@ -174,16 +231,13 @@ describe("Unclaimed Seats of a Team Licence with a Refund Request", () => {
     const licence = createTeamLicence(db, teamAdmin.id, course.id, ["SEAT-1"]);
     openTeamLicenceRefund(db, teamAdmin.id, licence);
 
-    const refused = claimSeat(db, {
-      code: "SEAT-1",
-      userId: user.id,
-      userCountry: "US",
-    });
-
-    expect(refused).toEqual({
-      ok: false,
-      error:
-        "This place is currently locked while a refund request is reviewed.",
+    expect(
+      rejection(() =>
+        claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" })
+      )
+    ).toMatchObject({
+      data: "This place is currently locked while a refund request is reviewed.",
+      init: { status: 409 },
     });
     expect(findEnrollment(db, user.id, course.id)).toBeUndefined();
   });
@@ -198,9 +252,8 @@ describe("Unclaimed Seats of a Team Licence with a Refund Request", () => {
       platformAdminUserId: teamAdmin.id,
     });
 
-    expect(
-      claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" }).ok
-    ).toBe(true);
+    claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" });
+    expect(findEnrollment(db, user.id, course.id)).toBeDefined();
   });
 
   it("are void after the Refund Request is approved", () => {
@@ -213,15 +266,13 @@ describe("Unclaimed Seats of a Team Licence with a Refund Request", () => {
       platformAdminUserId: teamAdmin.id,
     });
 
-    const refused = claimSeat(db, {
-      code: "SEAT-1",
-      userId: user.id,
-      userCountry: "US",
-    });
-
-    expect(refused).toEqual({
-      ok: false,
-      error: "This place was refunded and is no longer valid",
+    expect(
+      rejection(() =>
+        claimSeat(db, { code: "SEAT-1", userId: user.id, userCountry: "US" })
+      )
+    ).toMatchObject({
+      data: "This place was refunded and is no longer valid",
+      init: { status: 410 },
     });
     expect(findEnrollment(db, user.id, course.id)).toBeUndefined();
   });

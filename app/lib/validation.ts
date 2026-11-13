@@ -1,4 +1,4 @@
-import { data } from "react-router";
+import { data, isRouteErrorResponse } from "react-router";
 import type { z } from "zod";
 
 type ParseSuccess<T> = { success: true; data: T };
@@ -75,4 +75,32 @@ export async function parseJsonBody<T extends z.ZodType>(
   }
 
   return { success: false, errors };
+}
+
+// Statuses a server action throws when a business rule refuses what the user
+// asked (forbidden, gone, conflict...), as opposed to a broken request.
+const REFUSAL_STATUSES = new Set([403, 404, 409, 410]);
+
+/**
+ * For a route's `clientAction`. The server action follows the coding
+ * standard and throws `data(message, { status })` when a rule refuses the
+ * submission; in the browser that refusal is shown next to the form, in the
+ * same `{ errors }` shape as a field error, instead of replacing the page
+ * with the error boundary. Anything else (redirects, 401, 5xx) still throws.
+ */
+export async function refusalAsFormError<T>(
+  serverAction: () => Promise<T>
+): Promise<T | { errors: { form: string } }> {
+  try {
+    return await serverAction();
+  } catch (error) {
+    if (
+      isRouteErrorResponse(error) &&
+      REFUSAL_STATUSES.has(error.status) &&
+      typeof error.data === "string"
+    ) {
+      return { errors: { form: error.data } };
+    }
+    throw error;
+  }
 }
