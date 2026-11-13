@@ -1,16 +1,19 @@
-import { data, isRouteErrorResponse, Link } from "react-router";
+import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
 import { AlertTriangle, ReceiptText, UsersRound } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
 import { UserRole, users } from "~/db/schema";
 import {
+  decideRefundRequest,
   listOpenRefundRequests,
   MAX_WATCHED_SECONDS,
   REFUND_WINDOW_DAYS,
 } from "~/lib/admin-refunds.server";
 import { formatPrice } from "~/lib/utils";
+import { parseFormData } from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 
@@ -21,7 +24,7 @@ export function meta() {
   ];
 }
 
-export async function loader({ request }: Route.LoaderArgs) {
+async function requirePlatformAdmin(request: Request) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -40,7 +43,34 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("Only admins can access this page.", { status: 403 });
   }
 
+  return currentUser;
+}
+
+export async function loader({ request }: Route.LoaderArgs) {
+  await requirePlatformAdmin(request);
   return { requests: listOpenRefundRequests(db) };
+}
+
+const decisionSchema = z.object({
+  refundId: z.coerce.number().int(),
+  decision: z.enum(["approve", "decline"]),
+});
+
+export async function action({ request }: Route.ActionArgs) {
+  const admin = await requirePlatformAdmin(request);
+
+  const parsed = parseFormData(await request.formData(), decisionSchema);
+  if (!parsed.success) {
+    throw data("Invalid decision.", { status: 400 });
+  }
+
+  const decided = decideRefundRequest(db, {
+    refundId: parsed.data.refundId,
+    decision: parsed.data.decision,
+    adminUserId: admin.id,
+  });
+
+  return { refundId: decided.id, status: decided.status };
 }
 
 function formatWatchTime(seconds: number) {
@@ -101,6 +131,7 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
                     <th className={headerClass}>Purchased</th>
                     <th className={headerClass}>Progress</th>
                     <th className={headerClass}>Reason</th>
+                    <th className={headerClass}>Decision</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -162,6 +193,13 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
                       <td className="max-w-sm whitespace-pre-wrap px-4 py-3 text-sm">
                         {request.reason}
                       </td>
+                      <td className="px-4 py-3 text-sm">
+                        <DecisionButtons
+                          refundId={request.id}
+                          who={request.requesterName}
+                          amount={formatPrice(request.amountPaid)}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -170,6 +208,49 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
           </CardContent>
         </Card>
       )}
+    </div>
+  );
+}
+
+function DecisionButtons({
+  refundId,
+  who,
+  amount,
+}: {
+  refundId: number;
+  who: string;
+  amount: string;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+
+  const decide = (decision: "approve" | "decline", question: string) => {
+    if (!confirm(`${question} This cannot be undone.`)) return;
+    fetcher.submit({ refundId, decision }, { method: "post" });
+  };
+
+  return (
+    <div className="flex gap-2">
+      <Button
+        size="sm"
+        disabled={busy}
+        onClick={() =>
+          decide(
+            "approve",
+            `Approve the refund of ${amount} to ${who}? Their access from this purchase ends now.`
+          )
+        }
+      >
+        Approve
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={busy}
+        onClick={() => decide("decline", `Decline ${who}'s Refund Request?`)}
+      >
+        Decline
+      </Button>
     </div>
   );
 }
@@ -191,6 +272,12 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         typeof error.data === "string"
           ? error.data
           : "Only admins can access this page.";
+    } else if (error.status === 409) {
+      title = "Already decided";
+      message =
+        typeof error.data === "string"
+          ? error.data
+          : "This Refund Request was already decided.";
     } else {
       title = `Error ${error.status}`;
       message = typeof error.data === "string" ? error.data : error.statusText;

@@ -303,6 +303,9 @@ export const coupons = sqliteTable("coupons", {
     .references(() => purchases.id),
   redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
   redeemedAt: text("redeemed_at"),
+  // Set when the Team Licence is refunded while this seat is still
+  // Unclaimed. A voided seat can never be claimed.
+  voidedAt: text("voided_at"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
