@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
+import {
+  hasClaimedSeat,
+  lastDayOfRefundWindow,
+  purchaseRefundBlocker,
+} from "~/lib/refunds.server";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";
@@ -15,13 +20,11 @@ import {
   lessonProgress,
   courseRatings,
   purchases,
-  coupons,
   refunds,
   videoWatchEvents,
   LessonProgressStatus,
-  RefundStatus,
 } from "~/db/schema";
-import { eq, and, or, sql, inArray, isNotNull } from "drizzle-orm";
+import { eq, and, or, sql, inArray } from "drizzle-orm";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -366,7 +369,6 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
-const REFUND_WINDOW_DAYS = 14;
 const REFUND_WATCH_LIMIT_SECONDS = 2 * 60 * 60;
 const REFUND_COMPLETION_LIMIT = 0.5;
 
@@ -376,19 +378,6 @@ function getPurchaseForCourse(userId: number, courseId: number) {
     .from(purchases)
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
     .orderBy(sql`${purchases.createdAt} desc`)
-    .get();
-}
-
-function getOpenRefundRequest(purchaseId: number) {
-  return db
-    .select({ id: refunds.id })
-    .from(refunds)
-    .where(
-      and(
-        eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Open)
-      )
-    )
     .get();
 }
 
@@ -430,15 +419,6 @@ function getSecondsWatched(userId: number, lessonIds: number[]) {
   return furthestPerLesson.reduce((total, row) => total + row.furthest, 0);
 }
 
-// Compare whole days, not hours — a purchase at 23:00 should still get its
-// full fourteenth day.
-function asDayString(when: Date) {
-  const year = when.getFullYear();
-  const month = String(when.getMonth() + 1).padStart(2, "0");
-  const day = String(when.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 /**
  * What the learner is offered if they want their money back, or null if this
  * purchase cannot be refunded.
@@ -447,17 +427,8 @@ function getRefundOffer(userId: number, course: { id: number }) {
   const purchase = getPurchaseForCourse(userId, course.id);
 
   if (!purchase) return null;
-  if (getOpenRefundRequest(purchase.id)) return null;
-
-  const purchasedDay = asDayString(new Date(purchase.createdAt));
-  const windowEnd = new Date(purchase.createdAt);
-  windowEnd.setDate(windowEnd.getDate() + REFUND_WINDOW_DAYS);
-  const lastDayInWindow = asDayString(windowEnd);
-  const todayDay = asDayString(new Date());
-  const isWithinWindow =
-    todayDay >= purchasedDay && todayDay <= lastDayInWindow;
-
-  if (!isWithinWindow) return null;
+  if (purchaseRefundBlocker(db, purchase)) return null;
+  if (hasClaimedSeat(db, purchase.id)) return null;
 
   const lessonIds = getCourseLessonIds(course.id);
 
@@ -472,17 +443,10 @@ function getRefundOffer(userId: number, course: { id: number }) {
     return null;
   }
 
-  const claimedSeat = db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(
-      and(eq(coupons.purchaseId, purchase.id), isNotNull(coupons.redeemedAt))
-    )
-    .get();
-
-  if (claimedSeat) return null;
-
-  return { amount: purchase.amountPaid, lastDayInWindow };
+  return {
+    amount: purchase.amountPaid,
+    lastDayInWindow: lastDayOfRefundWindow(purchase.createdAt),
+  };
 }
 
 const ratingSchema = z.object({
