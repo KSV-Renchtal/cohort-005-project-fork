@@ -25,6 +25,7 @@ import {
   requestTeamLicenceRefund,
 } from "~/lib/refunds.server";
 import { parseFormData } from "~/lib/validation";
+import { isClaimedSeat } from "~/lib/seats.server";
 import { formatPrice } from "~/lib/utils";
 
 function getTeamForAdmin(userId: number) {
@@ -123,7 +124,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     }
     const entry = courseMap.get(coupon.courseId)!;
     entry.total++;
-    if (coupon.redeemedByUserId !== null) {
+    if (isClaimedSeat(coupon)) {
       entry.claimed++;
     }
   }

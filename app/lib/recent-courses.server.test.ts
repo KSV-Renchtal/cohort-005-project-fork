@@ -91,8 +91,8 @@ describe("listRecentlyProgressedCourses", () => {
       .get();
     decideRefundRequest(db, {
       refundId: refund.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     expect(

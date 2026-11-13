@@ -5,13 +5,12 @@ import { AlertTriangle, ReceiptText, UsersRound } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
-import { UserRole, users } from "~/db/schema";
+import { RefundStatus, UserRole, users } from "~/db/schema";
 import {
   decideRefundRequest,
   listOpenRefundRequests,
-  MAX_WATCHED_SECONDS,
-  REFUND_WINDOW_DAYS,
 } from "~/lib/admin-refunds.server";
+import { MAX_WATCHED_SECONDS, REFUND_WINDOW_DAYS } from "~/lib/refunds.server";
 import { formatPrice } from "~/lib/utils";
 import { parseFormData } from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
@@ -40,7 +39,7 @@ async function requirePlatformAdmin(request: Request) {
     .get();
 
   if (!currentUser || currentUser.role !== UserRole.Admin) {
-    throw data("Only admins can access this page.", { status: 403 });
+    throw data("Only Platform Admins can access this page.", { status: 403 });
   }
 
   return currentUser;
@@ -53,11 +52,11 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 const decisionSchema = z.object({
   refundId: z.coerce.number().int(),
-  decision: z.enum(["approve", "decline"]),
+  decision: z.enum([RefundStatus.Approved, RefundStatus.Declined]),
 });
 
 export async function action({ request }: Route.ActionArgs) {
-  const admin = await requirePlatformAdmin(request);
+  const platformAdmin = await requirePlatformAdmin(request);
 
   const parsed = parseFormData(await request.formData(), decisionSchema);
   if (!parsed.success) {
@@ -67,7 +66,7 @@ export async function action({ request }: Route.ActionArgs) {
   const decided = decideRefundRequest(db, {
     refundId: parsed.data.refundId,
     decision: parsed.data.decision,
-    adminUserId: admin.id,
+    platformAdminUserId: platformAdmin.id,
   });
 
   return { refundId: decided.id, status: decided.status };
@@ -224,7 +223,10 @@ function DecisionButtons({
   const fetcher = useFetcher<typeof action>();
   const busy = fetcher.state !== "idle";
 
-  const decide = (decision: "approve" | "decline", question: string) => {
+  const decide = (
+    decision: RefundStatus.Approved | RefundStatus.Declined,
+    question: string
+  ) => {
     if (!confirm(`${question} This cannot be undone.`)) return;
     fetcher.submit({ refundId, decision }, { method: "post" });
   };
@@ -236,7 +238,7 @@ function DecisionButtons({
         disabled={busy}
         onClick={() =>
           decide(
-            "approve",
+            RefundStatus.Approved,
             `Approve the refund of ${amount} to ${who}? Their access from this purchase ends now.`
           )
         }
@@ -247,7 +249,7 @@ function DecisionButtons({
         size="sm"
         variant="outline"
         disabled={busy}
-        onClick={() => decide("decline", `Decline ${who}'s Refund Request?`)}
+        onClick={() => decide(RefundStatus.Declined, `Decline ${who}'s Refund Request?`)}
       >
         Decline
       </Button>
@@ -271,7 +273,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       message =
         typeof error.data === "string"
           ? error.data
-          : "Only admins can access this page.";
+          : "Only Platform Admins can access this page.";
     } else if (error.status === 409) {
       title = "Already decided";
       message =

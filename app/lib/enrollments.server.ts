@@ -1,6 +1,7 @@
 import { data } from "react-router";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "~/db";
+import { isClaimedSeat } from "~/lib/seats.server";
 import {
   coupons,
   enrollments,
@@ -101,7 +102,7 @@ export function claimSeat(
       return { ok: false, error: "Coupon not found" };
     }
 
-    if (seat.redeemedByUserId !== null) {
+    if (isClaimedSeat(seat)) {
       return { ok: false, error: "Coupon has already been redeemed" };
     }
 

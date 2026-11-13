@@ -299,11 +299,14 @@ describe("requestOwnPurchaseRefund", () => {
         courseId: course.id,
         reason: REASON,
       }).request;
-    const decide = (refundId: number, decision: "approve" | "decline") =>
-      decideRefundRequest(db, { refundId, decision, adminUserId: admin.id });
+    const decide = (
+      refundId: number,
+      decision: schema.RefundStatus.Approved | schema.RefundStatus.Declined
+    ) =>
+      decideRefundRequest(db, { refundId, decision, platformAdminUserId: admin.id });
 
-    decide(ask().id, "decline");
-    decide(ask().id, "approve");
+    decide(ask().id, schema.RefundStatus.Declined);
+    decide(ask().id, schema.RefundStatus.Approved);
 
     expect(rejection(ask)).toMatchObject({ init: { status: 403 } });
   });
@@ -317,8 +320,8 @@ describe("requestOwnPurchaseRefund", () => {
     });
     decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     buyCourse(db, {
@@ -349,8 +352,8 @@ describe("requestOwnPurchaseRefund", () => {
       .get();
     decideRefundRequest(db, {
       refundId: refund.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     buyCourse(db, {
@@ -434,8 +437,8 @@ describe("ownPurchaseRefundOffer", () => {
     });
     decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: admin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: admin.id,
     });
 
     expect(offer()).toBeNull();

@@ -194,8 +194,8 @@ describe("Unclaimed Seats of a Team Licence with a Refund Request", () => {
     const request = openTeamLicenceRefund(db, teamAdmin.id, licence);
     decideRefundRequest(db, {
       refundId: request.id,
-      decision: "decline",
-      adminUserId: teamAdmin.id,
+      decision: schema.RefundStatus.Declined,
+      platformAdminUserId: teamAdmin.id,
     });
 
     expect(
@@ -209,8 +209,8 @@ describe("Unclaimed Seats of a Team Licence with a Refund Request", () => {
     const request = openTeamLicenceRefund(db, teamAdmin.id, licence);
     decideRefundRequest(db, {
       refundId: request.id,
-      decision: "approve",
-      adminUserId: teamAdmin.id,
+      decision: schema.RefundStatus.Approved,
+      platformAdminUserId: teamAdmin.id,
     });
 
     const refused = claimSeat(db, {

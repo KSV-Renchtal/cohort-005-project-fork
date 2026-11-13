@@ -18,6 +18,7 @@ import {
   findEnrollment,
   seatLockMessage,
 } from "~/lib/enrollments.server";
+import { isClaimedSeat } from "~/lib/seats.server";
 
 function getCourseById(id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
@@ -67,7 +68,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  const alreadyRedeemed = coupon.redeemedByUserId !== null;
+  const alreadyRedeemed = isClaimedSeat(coupon);
   const alreadyEnrolled = isUserEnrolled(currentUserId, coupon.courseId);
   const lockMessage = alreadyRedeemed ? null : seatLockMessage(db, coupon);
   const voided = coupon.voidedAt !== null;
